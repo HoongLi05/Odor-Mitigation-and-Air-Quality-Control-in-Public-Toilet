@@ -1,1 +1,7 @@
 streamlit
+numpy
+pandas
+plotly
+gymnasium
+stable-baselines3
+streamlit_autorefresh
