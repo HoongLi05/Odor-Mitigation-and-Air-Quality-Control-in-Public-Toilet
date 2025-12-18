@@ -763,109 +763,138 @@ def evaluate_policy_metrics(model, env, n_episodes=300, window=300):
 # Streamlit page config
 # -------------------------
 st.set_page_config(page_title="Public Toilet PPO Evaluation", layout="wide")
-st.title("🚻 Public Toilet PPO Evaluation Dashboard")
+st.title("🚻 PPO Evaluation: Public Toilet")
 
-# -------------------------
-# Sidebar settings
-# -------------------------
-episode_length = st.sidebar.slider("Episode Length", min_value=240, max_value=1440, step=120, value=1440)
-normalize_states = st.sidebar.checkbox("Normalize States", value=True)
+# -----------------------------
+# Sidebar
+# -----------------------------
+num_episodes = st.sidebar.number_input("Number of Episodes", value=20, min_value=1, step=1)
+episode_length = st.sidebar.number_input("Episode Length", value=1440, step=1)
 seed = st.sidebar.number_input("Random Seed", value=42, step=1)
-run_button = st.sidebar.button("▶️ Run PPO Evaluation")
+speed = st.sidebar.slider("Speed (seconds per episode)", min_value=0.01, max_value=1.0, value=1.0, step=0.1)
 
-# -------------------------
-# PPO model path
-# -------------------------
-MODEL_PATH = "trained_models/ppo_model.zip"
+# -----------------------------
+# Control Buttons
+# -----------------------------
+play_button = st.sidebar.button("▶️ Play / Resume")
+pause_button = st.sidebar.button("⏸ Pause")
+replay_button = st.sidebar.button("🔁 Replay")
 
-# -------------------------
-# Cached environment
-# -------------------------
+# -----------------------------
+# Session State
+# -----------------------------
+if "is_playing" not in st.session_state:
+    st.session_state.is_playing = False
+if "current_episode" not in st.session_state:
+    st.session_state.current_episode = 1
+if "episode_rewards" not in st.session_state:
+    st.session_state.episode_rewards = []
+if "episode_numbers" not in st.session_state:
+    st.session_state.episode_numbers = []
+
+# -----------------------------
+# Load PPO Model
+# -----------------------------
+@st.cache_resource
+def load_ppo_model():
+    env_tmp = ToiletEnv(episode_length=episode_length, normalize_states=True, seed=seed)
+    env_tmp = PublicToiletEnvWrapper(env_tmp)
+    model = PPO.load("trained_models/ppo_model.zip", env=env_tmp)
+    return model
+
+# -----------------------------
+# Create environment
+# -----------------------------
 @st.cache_resource
 def make_env():
-    env = ToiletEnv(episode_length=episode_length, normalize_states=normalize_states, seed=seed, silent=True)
+    env = ToiletEnv(episode_length=episode_length, normalize_states=True, seed=seed)
     env = PublicToiletEnvWrapper(env)
     return Monitor(env)
 
 env = make_env()
+model = load_ppo_model()
 
-# -------------------------
-# Load PPO model
-# -------------------------
-@st.cache_resource
-def load_ppo_model():
-    return PPO.load(MODEL_PATH, env=env)
+# -----------------------------
+# Placeholders
+# -----------------------------
+state_placeholder = st.empty()
+fig_placeholder = st.empty()
 
-# -------------------------
-# Run Evaluation
-# -------------------------
-if run_button:
-    st.info("Running PPO evaluation...")
+# -----------------------------
+# Plotly Figure
+# -----------------------------
+fig = go.Figure()
+fig.update_layout(
+    title="Total Reward per Episode",
+    xaxis_title="Episode",
+    yaxis_title="Total Reward",
+    xaxis=dict(range=[0, num_episodes + 1]),
+    yaxis=dict(range=[-10000, 10000]),
+)
+# Blue line for rewards
+fig.add_trace(go.Scatter(x=[], y=[], mode='lines+markers', line=dict(color='blue', width=2), name='Total Reward'))
+# Black dashed vertical line for current episode
+fig.add_trace(go.Scatter(x=[1,1], y=[-1000,1000], mode='lines', line=dict(color='black', dash='dash'), name='Current Episode'))
 
-    try:
-        model = load_ppo_model()
-    except Exception as e:
-        st.error(f"❌ Failed to load PPO model: {e}")
-        st.stop()
+# -----------------------------
+# Handle button clicks
+# -----------------------------
+if play_button:
+    st.session_state.is_playing = True
 
-    # Placeholders
-    reward_placeholder = st.empty()
-    state_placeholder = st.empty()
-    fig_placeholder = st.empty()
+if pause_button:
+    st.session_state.is_playing = False
 
-    # Initialize plotting data
-    rewards = []
-    timesteps = []
+if replay_button:
+    st.session_state.is_playing = True
+    st.session_state.current_episode = 1
+    st.session_state.episode_rewards = []
+    st.session_state.episode_numbers = []
 
-    # Reset environment
+# -----------------------------
+# Run Evaluation Loop
+# -----------------------------
+while st.session_state.current_episode <= num_episodes:
+    if not st.session_state.is_playing:
+        break
+
+    ep = st.session_state.current_episode
+
     obs, _ = env.reset()
     done = False
     total_reward = 0.0
-    step = 0
-
-    # Plotly figure setup
-    fig = go.Figure()
-    fig.update_layout(
-        title="Cumulative Reward over Time",
-        xaxis_title="Timestep",
-        yaxis_title="Cumulative Reward",
-        xaxis=dict(range=[0, episode_length]),
-        yaxis=dict(range=[0, 1]),
-    )
-    # reward line
-    fig.add_trace(go.Scatter(x=[], y=[], mode='lines', name='Cumulative Reward'))
-    # current step dashed line
-    fig.add_trace(go.Scatter(x=[0,0], y=[0,0], mode='lines', line=dict(dash='dash', color='red'), name='Current Step'))
 
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
         done = terminated or truncated
-        step = info['step']
 
-        # Append data
-        rewards.append(total_reward)
-        timesteps.append(step)
+    # Save episode data
+    st.session_state.episode_rewards.append(total_reward)
+    st.session_state.episode_numbers.append(ep)
 
-        # Update state display
-        state_placeholder.markdown(
-            f"**Timestep:** {step} / {episode_length}  \n"
-            f"**NH3:** {info['state_dict']['nh3_ppm']:.3f} ppm  \n"
-            f"**H2S:** {info['state_dict']['h2s_ppm']:.3f} ppm  \n"
-            f"**CO2:** {info['state_dict']['co2_ppm']:.0f} ppm  \n"
-            f"**Temp:** {info['state_dict']['temperature_c']:.1f} °C  \n"
-            f"**Humidity:** {info['state_dict']['humidity_percent']:.1f} %"
-        )
+    # Update state display
+    state_placeholder.markdown(
+        f"**Episode {ep} finished!**  \n"
+        f"**Total Reward:** {total_reward:.2f}  \n"
+        f"**Final NH3:** {info['state_dict']['nh3_ppm']:.3f} ppm  \n"
+        f"**Final H2S:** {info['state_dict']['h2s_ppm']:.3f} ppm  \n"
+        f"**Final CO2:** {info['state_dict']['co2_ppm']:.0f} ppm  \n"
+        f"**Final Temp:** {info['state_dict']['temperature_c']:.1f} °C  \n"
+        f"**Final Humidity:** {info['state_dict']['humidity_percent']:.1f} %"
+    )
 
-        # Update plot
-        fig.data[0].x = timesteps
-        fig.data[0].y = rewards
-        fig.data[1].x = [step, step]
-        fig.data[1].y = [0, max(rewards)*1.1]
-        fig_placeholder.plotly_chart(fig, use_container_width=True)
+    # Update plot
+    fig.data[0].x = st.session_state.episode_numbers
+    fig.data[0].y = st.session_state.episode_rewards
+    y_min, y_max = fig.layout.yaxis.range
+    fig.data[1].x = [ep, ep]
+    fig.data[1].y = [y_min, y_max]
+    fig_placeholder.plotly_chart(fig, use_container_width=True)
 
-        # Wait 1 second for real-time effect
-        time.sleep(1)
+    # Increment episode
+    st.session_state.current_episode += 1
+    time.sleep(speed)
 
-    st.success(f"🎯 PPO Evaluation Finished | Total Reward = {total_reward:.2f}")
+st.success("✅ PPO Evaluation Finished!")
