@@ -1,820 +1,871 @@
-import os
-import time
-import numpy as np
-import pandas as pd
 import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import numpy as np
+
+from stable_baselines3 import PPO, DQN, SAC, A2C
+from stable_baselines3.common.monitor import Monitor
+import itertools
 import random
 import gymnasium as gym
-from gymnasium import spaces
-import warnings
-warnings.filterwarnings('ignore')
-
-import os
-import pickle
 import numpy as np
-import pandas as pd
-import streamlit as st
-import plotly.express as px
+from gymnasium import spaces
+import time
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-from stable_baselines3 import PPO, A2C, SAC, DQN
-import warnings
-warnings.filterwarnings('ignore')
 
-# =============================
-# 頁面配置
-# =============================
-st.set_page_config(
-    page_title="公共廁所RL模型視覺化",
-    layout="wide",
-    page_icon="🚽",
-    initial_sidebar_state="expanded"
-)
 
-# 自定義CSS
-st.markdown("""
-<style>
-    .model-card {
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-        border-left: 5px solid;
+
+# -------------------------
+# Configuration
+# -------------------------
+
+
+system_parameters = {
+    # Power ratings in Watts
+    'POWER_EXHAUST_FAN_W': 55,
+    'POWER_CEILING_FAN_W': 42.5,
+    'POWER_DEHUMIDIFIER_W': 500,
+
+    # Threshold values for environmental parameters
+    'THRESHOLD_CO2_PPM_MIN': 400,
+    'THRESHOLD_CO2_PPM1': 800,
+    'THRESHOLD_CO2_PPM2': 1000,
+    'THRESHOLD_CO2_PPM_MAX': 1500,
+
+    # NH3 Thresholds
+    'NH3_THRESHOLD_PPM_MIN': 0.032,
+    'NH3_THRESHOLD_PPM1': 3,
+    'NH3_THRESHOLD_PPM_MAX': 5,
+
+    # H2S Thresholds
+    'H2S_THRESHOLD_PPM1': 0.01,
+    'H2S_THRESHOLD_PPM2': 1.5,
+
+    'THRESHOLD_TEMPERATURE_C': {
+        'LOW': 28,              # Degrees Celsius
+        'HIGH': 30.5              # Degrees Celsius
+    },
+    'THRESHOLD_HUMIDITY_PERCENT': {
+        'LOW': 61.4,              # Percentage
+        'HIGH': 73.8              # Percentage
+    },
+
+
+    # Scaling coefficients (k values) for reward functions
+    'K_CO2': 0.05,
+    'K_ENERGY_CONSUMPTION': 0.02,
+    'K_TEMPERATURE_COMFORT': 0.01,
+    'K_HUMIDITY_COMFORT': 0.01,
+    'K_NH3': 0.05,
+    'K_H2S': 0.05,
+    'DELTA_T_HOURS': 1/60,       # Timestep duration in hours for energy calculation
+}
+
+print("System parameters and constants defined successfully.")
+print(system_parameters)
+
+
+# -------------------------
+# K-Value Tuning Functions
+# -------------------------
+def normalize_k_values():
+  """K value normalized based on benchmark value"""
+  benchmarks = {
+      'CO2': 1000,
+      'NH3': 10,
+      'H2S': 0.5,
+      'Temperature': 5,
+      'Humidity': 20,
+      'Energy':100
+  }
+
+  target_range = 1.0
+  k_values = {}
+
+  #Normalization of secondary penalties
+  k_values['K_CO2'] = target_range / (benchmarks['CO2'] ** 2)
+  k_values['K_NH3'] = target_range / (benchmarks['NH3'] ** 2)
+  k_values['K_H2S'] = target_range / (benchmarks['H2S'] ** 2)
+  # Standardize key names for consistency
+  k_values['K_TEMPERATURE_COMFORT'] = target_range / (benchmarks['Temperature'] ** 2)
+  k_values['K_HUMIDITY_COMFORT'] = target_range / (benchmarks['Humidity'] ** 2)
+  k_values['K_ENERGY_CONSUMPTION'] = target_range / (benchmarks['Energy'] ** 2)
+
+  return k_values
+
+def set_k_by_priority():
+  """K value is set based on priority
+  Priority 1-5, 5 being the highest"""
+
+  priorities = {
+      'CO2': 3,
+      'NH3': 5,
+      'H2S': 5,
+      'TEMPERATURE_COMFORT': 2,
+      'HUMIDITY_COMFORT': 3,
+      'ENERGY_CONSUMPTION':1
+  }
+
+  priority_to_k = {
+      1: 0.01,
+      2: 0.02,
+      3: 0.05,
+      4: 0.1,
+      5: 0.2
+  }
+
+  k_params = {}
+  for param, priority in priorities.items():
+    k_params[f'K_{param}'] = priority_to_k[priority]
+
+  return k_params
+
+def update_k_values(method='priority'):
+  """Update the K value in the system parameters"""
+  if method == 'normalize':
+    new_k_values = normalize_k_values()
+  elif method == 'priority':
+    new_k_values = set_k_by_priority()
+  elif method == 'hybrid':
+    # Hybrid approach: Prioritize for security-related aspects, normalize for others.
+    priority_k = set_k_by_priority()
+    normalize_k = normalize_k_values()
+    new_k_values = {
+        'K_NH3': priority_k['K_NH3'], # Use string literal for key
+        'K_H2S': priority_k['K_H2S'], # Use string literal for key
+        'K_CO2': priority_k['K_CO2'], # Use string literal for key
+        'K_TEMPERATURE_COMFORT': normalize_k['K_TEMPERATURE_COMFORT'], # Use string literal for key and standardized name
+        'K_HUMIDITY_COMFORT': normalize_k['K_HUMIDITY_COMFORT'],     # Use string literal for key and standardized name
+        'K_ENERGY_CONSUMPTION': normalize_k['K_ENERGY_CONSUMPTION'] # Use string literal for key
     }
-    .ppo-card { border-left-color: #FF6B6B; background-color: #FF6B6B10; }
-    .a2c-card { border-left-color: #4ECDC4; background-color: #4ECDC410; }
-    .sac-card { border-left-color: #45B7D1; background-color: #45B7D110; }
-    .dqn-card { border-left-color: #96CEB4; background-color: #96CEB410; }
-    .status-indicator {
-        display: inline-block;
-        width: 12px;
-        height: 12px;
-        border-radius: 50%;
-        margin-right: 8px;
-    }
-    .good { background-color: #28a745; }
-    .warning { background-color: #ffc107; }
-    .bad { background-color: #dc3545; }
-</style>
-""", unsafe_allow_html=True)
+  else:
+    print(f"Unknown method: {method}. Using default.")
+    return
 
-# =============================
-# 假設的模型載入函數
-# =============================
-# 注意：這裡需要根據您實際的模型儲存方式進行調整
+  # Update system parameter
+  for key, value in new_k_values.items():
+    system_parameters[key] = value
+  print("K values updated successfully.")
 
-def load_pretrained_model(model_name, model_path):
-    """
-    載入預訓練的Stable-Baselines3模型
-    """
-    try:
-        if os.path.exists(model_path):
-            if model_path.endswith(".zip"):
-                # 根據模型類型載入
-                if model_name == "PPO":
-                    model_data = PPO.load(model_path)
-                elif model_name == "A2C":
-                    model_data = A2C.load(model_path)
-                elif model_name == "SAC":
-                    model_data = SAC.load(model_path)
-                elif model_name == "DQN":
-                    model_data = DQN.load(model_path)
-                else:
-                    model_data = None
+# -------------------------
+# Reward Weighting System
+# -------------------------
+class RewardWeighter:
+    def __init__(self, num_components=5, lr=0.05):
+        self.num_components = num_components
+        self.lr = lr
+        self.weights = np.ones(num_components) / num_components
+        self.running_variance = np.zeros(num_components)
+        self.component_history = {i: [] for i in range(num_components)}
 
-                st.sidebar.success(f"✅ {model_name} 模型載入成功")
-                
-                # 返回字典，用來顯示統計信息
-                return {
-                    'name': model_name,
-                    'data': {
-                        'model_obj': model_data,
-                        'total_timesteps': getattr(model_data, 'num_timesteps', 'N/A'),
-                        'avg_reward': 'N/A'
-                    },
-                    'color': get_model_color(model_name),
-                    'loaded': True
-                }
-            else:
-                # 如果是 pickle 文件
-                with open(model_path, 'rb') as f:
-                    model_data = pickle.load(f)
-                st.sidebar.success(f"✅ {model_name} 模型載入成功")
-                return {
-                    'name': model_name,
-                    'data': model_data,
-                    'color': get_model_color(model_name),
-                    'loaded': True
-                }
-        else:
-            st.sidebar.warning(f"⚠️ 未找到模型文件，使用模擬數據")
-            return create_mock_model(model_name)
-        
-    except Exception as e:
-        st.sidebar.error(f"❌ 載入{model_name}模型失敗: {e}")
-        return create_mock_model(model_name)
+    def update(self, reward_components):
+        reward_components = np.array(reward_components)
 
-def get_model_color(model_name):
-    """獲取模型對應的顏色"""
-    colors = {
-        'PPO': '#FF6B6B',
-        'A2C': '#4ECDC4', 
-        'SAC': '#45B7D1',
-        'DQN': '#96CEB4'
-    }
-    return colors.get(model_name, '#6c757d')
+        # Record historical values ​​(for analysis)
+        for i, value in enumerate(reward_components):
+            self.component_history[i].append(value)
 
-def create_mock_model(model_name):
-    """創建模擬模型數據（用於演示）"""
-    return {
-        'name': model_name,
-        'data': {
-            'episodes_trained': np.random.randint(1000, 5000),
-            'total_timesteps': np.random.randint(10000, 50000),
-            'avg_reward': np.random.uniform(-50, 100),
-            'best_reward': np.random.uniform(0, 150),
-            'training_time': timedelta(minutes=np.random.randint(30, 180))
-        },
-        'color': get_model_color(model_name),
-        'loaded': False
-    }
+        # Track magnitude / variance (importance)
+        self.running_variance = 0.9 * self.running_variance + 0.1 * (reward_components ** 2)
 
-# =============================
-# 模擬推論函數
-# =============================
+        # Convert variance to raw importance ratio
+        raw_importance = self.running_variance / (np.sum(self.running_variance) + 1e-9)
 
-def simulate_model_inference(model_info, steps=100):
-    """
-    使用載入的模型進行模擬推論
-    返回模擬數據
-    """
-    # 創建模擬數據 - 這裡應該替換為實際的模型推論
-    hours = steps // 60 if steps > 60 else 1
-    
-    # 創建時間序列
-    timestamps = pd.date_range(
-        start=datetime.now().replace(hour=6, minute=0, second=0),
-        periods=steps,
-        freq='1min'
-    )
-    
-    # 污染物濃度模擬
-    base_nh3 = np.random.uniform(0.5, 2.0)
-    base_co2 = np.random.uniform(400, 600)
-    base_temp = np.random.uniform(24, 28)
-    base_humidity = np.random.uniform(55, 70)
-    
-    # 根據模型類型調整趨勢
-    if model_info['name'] == 'PPO':
-        # PPO: 較為平穩
-        nh3_trend = np.sin(np.linspace(0, 4*np.pi, steps)) * 0.5 + base_nh3
-        co2_trend = np.sin(np.linspace(0, 2*np.pi, steps)) * 100 + base_co2
-    elif model_info['name'] == 'A2C':
-        # A2C: 波動較大
-        nh3_trend = np.sin(np.linspace(0, 8*np.pi, steps)) * 1.0 + base_nh3
-        co2_trend = np.sin(np.linspace(0, 4*np.pi, steps)) * 150 + base_co2
-    elif model_info['name'] == 'SAC':
-        # SAC: 探索性強
-        nh3_trend = base_nh3 + np.cumsum(np.random.randn(steps)) * 0.1
-        co2_trend = base_co2 + np.cumsum(np.random.randn(steps)) * 10
-    else:  # DQN
-        # DQN: 較為保守
-        nh3_trend = np.ones(steps) * base_nh3 + np.random.randn(steps) * 0.3
-        co2_trend = np.ones(steps) * base_co2 + np.random.randn(steps) * 50
-    
-    # 創建數據框
-    df = pd.DataFrame({
-        'timestamp': timestamps,
-        'hour': timestamps.hour,
-        'minute': timestamps.minute,
-        'time_minutes': np.arange(steps),
-        'nh3_ppm': np.clip(nh3_trend, 0, 30),
-        'h2s_ppm': np.clip(np.random.exponential(0.05, steps), 0, 2),
-        'co2_ppm': np.clip(co2_trend, 300, 2000),
-        'temperature_c': base_temp + np.sin(np.linspace(0, 2*np.pi, steps)) * 2,
-        'humidity_percent': np.clip(base_humidity + np.sin(np.linspace(0, np.pi, steps)) * 10, 40, 85),
-        'user_count': (np.sin(np.linspace(0, 4*np.pi, steps)) * 2 + 3).clip(0, 10).astype(int),
-        'energy_consumption': np.random.uniform(0.5, 3.0, steps),
-        'reward': np.random.normal(10, 3, steps),
-        'action_taken': np.random.choice(ACTION_SPACE, size=steps),
-        'model': model_info['name']
-    })
-    
-    # 添加設備狀態（基於動作）
-    df['exhaust_fan'] = df['action_taken'].apply(lambda x: 'exhaust' in x or x == 'all_on')
-    df['ceiling_fan'] = df['action_taken'].apply(lambda x: 'ceiling' in x or x == 'all_on')
-    df['dehumidifier'] = df['action_taken'].apply(lambda x: 'dehum' in x or x == 'all_on')
-    
-    return df
+        # Smooth update
+        self.weights = (1 - self.lr) * self.weights + self.lr * raw_importance
 
-# =============================
-# 視覺化函數
-# =============================
+        # Normalize so sum = 1
+        self.weights = self.weights / np.sum(self.weights)
 
-def create_pollutant_chart(df, current_step=None):
-    """創建污染物濃度圖表（支持動態顯示）"""
-    fig = go.Figure()
-    
-    # 確定要顯示的數據範圍
-    if current_step is not None and current_step < len(df):
-        display_df = df.iloc[:current_step+1]
+    def get_weighted_reward(self, reward_components):
+        return float(np.dot(self.weights, reward_components))
+
+    def get_component_stats(self):
+        """Get statistics for each reward component"""
+        stats = {}
+        for i, values in self.component_history.items():
+          if values:
+            stats[f'component_{i}'] = {
+                'mean': np.mean(values),
+                'std': np.std(values),
+                'min': np.min(values),
+                'max': np.max(values),
+                'count': len(values)
+            }
+        return stats
+
+# -------------------------
+# Reward Functions
+# -------------------------
+def calculate_co2_reward(current_co2_ppm):
+
+    co2_min = system_parameters['THRESHOLD_CO2_PPM1']      # 800 ppm
+    co2_mid = system_parameters['THRESHOLD_CO2_PPM2']      # 1000 ppm
+    co2_max = system_parameters['THRESHOLD_CO2_PPM_MAX']   # 1500 ppm
+    k_co2 = system_parameters['K_CO2']
+
+    # Region 1: CO2 ≤ 800 → reward = +1
+    if current_co2_ppm <= co2_min:
+        return 1.0
+
+    # Region 2: 800 < CO2 ≤ 1000 → small positive reward depending on distance from 1000
+    if co2_min < current_co2_ppm <= co2_mid:
+        return k_co2 * (1000 - current_co2_ppm)**1.5
+
+    # Region 3: 1000 < CO2 < 1500 → negative quadratic penalty
+    if co2_mid < current_co2_ppm < co2_max:
+        return -k_co2 * (current_co2_ppm - 1000)**1.5
+
+    # Region 4: CO2 ≥ 1500 → hard penalty
+    return -1.0
+
+def calculate_nh3_reward(current_nh3_ppm):
+
+    k_nh3 = system_parameters.get('K_NH3', 0.05)
+    thr_low = system_parameters.get('NH3_THRESHOLD_PPM1', 3.0)
+    thr_high = system_parameters.get('NH3_THRESHOLD_PPM_MAX', 5.0)
+
+    # Safe clipping (in case sensor reading is weird)
+    nh3 = float(np.clip(current_nh3_ppm, 0.0, 1e6))
+
+    if nh3 < thr_low:
+        return 1.0
+    elif thr_low <= nh3 < thr_high:
+        return -k_nh3 * (nh3 - thr_low) ** 1.5
+    else:  # nh3 >= thr_high
+        return -1.0
+
+def calculate_h2s_reward(current_h2s_ppm):
+    k_h2s = system_parameters['K_H2S']
+    thr_low = system_parameters['H2S_THRESHOLD_PPM1']   # 0.01 ppm
+    thr_high = system_parameters['H2S_THRESHOLD_PPM2']  # 1.5 ppm
+
+    h2s = float(np.clip(current_h2s_ppm, 0.0, 1e6))
+
+    # Region 1: Good air quality
+    if h2s < thr_low:
+        return 1.0
+
+    # Region 2: Mild pollution (soft penalty)
+    elif thr_low <= h2s < thr_high:
+        return -k_h2s * (h2s - thr_low) ** 1.5
+
+    # Region 3: Dangerous (hard penalty)
     else:
-        display_df = df
-    
-    # NH3
-    fig.add_trace(go.Scatter(
-        x=display_df['time_minutes'],
-        y=display_df['nh3_ppm'],
-        mode='lines+markers',
-        name='NH3 (ppm)',
-        line=dict(color='#FF6B6B', width=2),
-        marker=dict(size=4)
-    ))
-    
-    # CO2 (右側Y軸)
-    fig.add_trace(go.Scatter(
-        x=display_df['time_minutes'],
-        y=display_df['co2_ppm'],
-        mode='lines+markers',
-        name='CO2 (ppm)',
-        line=dict(color='#4ECDC4', width=2),
-        marker=dict(size=4),
-        yaxis='y2'
-    ))
-    
-    # 如果正在播放，添加當前位置標記
-    if current_step is not None and current_step < len(df):
-        current_time = df.iloc[current_step]['time_minutes']
-        current_nh3 = df.iloc[current_step]['nh3_ppm']
-        current_co2 = df.iloc[current_step]['co2_ppm']
-        
-        # 添加垂直線標記當前位置
-        fig.add_vline(x=current_time, line_dash="dash", line_color="gray", opacity=0.5)
-        
-        # 添加當前點標記
-        fig.add_trace(go.Scatter(
-            x=[current_time],
-            y=[current_nh3],
-            mode='markers',
-            name='當前NH3',
-            marker=dict(size=12, color='#FF0000'),
-            showlegend=False
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=[current_time],
-            y=[current_co2],
-            mode='markers',
-            name='當前CO2',
-            marker=dict(size=12, color='#00FF00'),
-            showlegend=False,
-            yaxis='y2'
-        ))
-    
-    # 安全閾值線
-    fig.add_hline(y=10, line_dash="dash", line_color="red", 
-                  annotation_text="NH3安全限值", annotation_position="top right")
-    fig.add_hline(y=1500, line_dash="dash", line_color="orange", 
-                  annotation_text="CO2舒適限值", yref='y2')
-    
-    fig.update_layout(
-        title=f'污染物濃度變化 ({len(display_df)}/{len(df)} 分鐘)',
-        xaxis_title='時間 (分鐘)',
-        yaxis_title='NH3 (ppm)',
-        yaxis2=dict(
-            title='CO2 (ppm)',
-            overlaying='y',
-            side='right'
-        ),
-        hovermode='x unified',
-        height=400,
-        template='plotly_white'
-    )
-    
-    return fig
+        return -1.0
 
-def create_comfort_chart(df, current_step=None):
-    """創建舒適度圖表（支持動態顯示）"""
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    
-    # 確定要顯示的數據範圍
-    if current_step is not None and current_step < len(df):
-        display_df = df.iloc[:current_step+1]
+def calculate_comfort_reward(current_temperature_c, current_humidity_percent):
+    temp_low = system_parameters['THRESHOLD_TEMPERATURE_C']['LOW']
+    temp_high = system_parameters['THRESHOLD_TEMPERATURE_C']['HIGH']
+    hum_low = system_parameters['THRESHOLD_HUMIDITY_PERCENT']['LOW']
+    hum_high = system_parameters['THRESHOLD_HUMIDITY_PERCENT']['HIGH']
+    k_temp_comfort = system_parameters['K_TEMPERATURE_COMFORT'] # Standardized key
+    k_hum_comfort = system_parameters['K_HUMIDITY_COMFORT']     # Standardized key
+
+    # Temperature reward
+    if current_temperature_c <= temp_low:
+        r_temp = 1.0
+    elif temp_low < current_temperature_c < temp_high:
+        r_temp = -k_temp_comfort * ((current_temperature_c - temp_low) ** 1.5)
     else:
-        display_df = df
-    
-    # 溫度 (主Y軸)
-    fig.add_trace(go.Scatter(
-        x=display_df['time_minutes'],
-        y=display_df['temperature_c'],
-        mode='lines+markers',
-        name='溫度 (°C)',
-        line=dict(color='#FF9F1C', width=3),
-        marker=dict(size=4)
-    ), secondary_y=False)
-    
-    # 濕度 (次Y軸)
-    fig.add_trace(go.Scatter(
-        x=display_df['time_minutes'],
-        y=display_df['humidity_percent'],
-        mode='lines+markers',
-        name='濕度 (%)',
-        line=dict(color='#2EC4B6', width=3),
-        marker=dict(size=4)
-    ), secondary_y=True)
-    
-    # 如果正在播放，添加當前位置標記
-    if current_step is not None and current_step < len(df):
-        current_time = df.iloc[current_step]['time_minutes']
-        current_temp = df.iloc[current_step]['temperature_c']
-        current_hum = df.iloc[current_step]['humidity_percent']
-        
-        # 添加當前點標記
-        fig.add_trace(go.Scatter(
-            x=[current_time],
-            y=[current_temp],
-            mode='markers',
-            name='當前溫度',
-            marker=dict(size=12, color='#FF6B00'),
-            showlegend=False
-        ), secondary_y=False)
-        
-        fig.add_trace(go.Scatter(
-            x=[current_time],
-            y=[current_hum],
-            mode='markers',
-            name='當前濕度',
-            marker=dict(size=12, color='#0088FF'),
-            showlegend=False
-        ), secondary_y=True)
-    
-    # 舒適區間
-    fig.add_hrect(y0=24, y1=28, line_width=0, fillcolor="green", opacity=0.1,
-                  annotation_text="舒適溫度區間", annotation_position="top left",
-                  secondary_y=False)
-    
-    fig.add_hrect(y0=50, y1=70, line_width=0, fillcolor="blue", opacity=0.1,
-                  annotation_text="舒適濕度區間",
-                  secondary_y=True)
-    
-    fig.update_yaxes(title_text="溫度 (°C)", secondary_y=False)
-    fig.update_yaxes(title_text="濕度 (%)", secondary_y=True)
-    
-    fig.update_layout(
-        title=f'溫濕度舒適度 ({len(display_df)}/{len(df)} 分鐘)',
-        xaxis_title='時間 (分鐘)',
-        height=350,
-        template='plotly_white'
-    )
-    
-    return fig
+        r_temp = -1.0
 
-def create_equipment_chart(df):
-    """創建設備使用圖表"""
-    # 計算各設備使用時間
-    equipment_usage = pd.DataFrame({
-        '設備': ['排氣扇', '天花板風扇', '除濕機'],
-        '使用時間 (分鐘)': [
-            df['exhaust_fan'].sum(),
-            df['ceiling_fan'].sum(),
-            df['dehumidifier'].sum()
-        ],
-        '顏色': ['#FF6B6B', '#4ECDC4', '#45B7D1']
-    })
-    
-    fig = px.bar(
-        equipment_usage,
-        x='設備',
-        y='使用時間 (分鐘)',
-        color='設備',
-        color_discrete_map={
-            '排氣扇': '#FF6B6B',
-            '天花板風扇': '#4ECDC4',
-            '除濕機': '#45B7D1'
-        },
-        title='設備使用時間統計'
-    )
-    
-    fig.update_layout(
-        height=300,
-        template='plotly_white'
-    )
-    
-    return fig
+    # Humidity reward
+    if current_humidity_percent <= hum_low:
+        r_hum = 1.0
+    elif hum_low < current_humidity_percent < hum_high:
+        r_hum = -k_hum_comfort * ((current_humidity_percent - hum_low) ** 1.5)
+    else:
+        r_hum = -1.0
 
-def create_reward_chart(df):
-    """創建獎勵圖表"""
-    fig = go.Figure()
-    
-    # 即時獎勵
-    fig.add_trace(go.Scatter(
-        x=df['time_minutes'],
-        y=df['reward'],
-        mode='lines',
-        name='即時獎勵',
-        line=dict(color='#7209B7', width=2)
-    ))
-    
-    # 累積獎勵
-    cumulative_reward = df['reward'].cumsum()
-    fig.add_trace(go.Scatter(
-        x=df['time_minutes'],
-        y=cumulative_reward,
-        mode='lines',
-        name='累積獎勵',
-        line=dict(color='#F72585', width=3)
-    ))
-    
-    fig.update_layout(
-        title='獎勵曲線',
-        xaxis_title='時間 (分鐘)',
-        yaxis_title='獎勵值',
-        height=350,
-        template='plotly_white'
-    )
-    
-    return fig
+    # Combine
+    total_comfort_penalty = (r_temp + r_hum) / 2.0
 
-def create_comparison_chart(comparison_data):
-    """創建模型比較圖表"""
-    fig = go.Figure()
-    
-    # 總獎勵比較
-    fig.add_trace(go.Bar(
-        x=comparison_data['Model'],
-        y=comparison_data['Total Reward'],
-        name='總獎勵',
-        marker_color=[get_model_color(m) for m in comparison_data['Model']]
-    ))
-    
-    fig.update_layout(
-        title='模型總獎勵比較',
-        xaxis_title='模型',
-        yaxis_title='總獎勵',
-        height=400,
-        template='plotly_white'
-    )
-    
-    return fig
+    return total_comfort_penalty
 
-# =============================
-# 動作空間（從您的環境複製）
-# =============================
+def calculate_energy_cost(action):
+    power_exhaust_fan = system_parameters['POWER_EXHAUST_FAN_W']
+    power_ceiling_fan = system_parameters['POWER_CEILING_FAN_W']
+    power_dehumidifier = system_parameters['POWER_DEHUMIDIFIER_W']
+    k_energy = system_parameters['K_ENERGY_CONSUMPTION']
+    delta_t_hours = system_parameters['DELTA_T_HOURS']
+
+    total_power_consumption = 0
+    if action.get('exhaust_fan', 0) == 1:
+        total_power_consumption += power_exhaust_fan
+    if action.get('ceiling_fan', 0) == 1:
+        total_power_consumption += power_ceiling_fan
+    if action.get('dehumidifier', 0) == 1:
+        total_power_consumption += power_dehumidifier
+
+    et = total_power_consumption * delta_t_hours
+
+    energy_cost = -k_energy * et
+    return energy_cost
+
+def calculate_total_reward(state, action, weighter=None):
+    co2_r = calculate_co2_reward(state['co2_ppm'])
+    nh3_r = calculate_nh3_reward(state['nh3_ppm'])
+    h2s_r = calculate_h2s_reward(state['h2s_ppm'])
+    comfort_r = calculate_comfort_reward(state['temperature_c'], state['humidity_percent'])
+    energy_c = calculate_energy_cost(action)
+
+    reward_components = [co2_r, nh3_r, h2s_r, comfort_r, energy_c]
+
+    if weighter is None:
+        # fallback: simple sum
+        return sum(reward_components), reward_components
+
+    # Weighted reward
+    weighted_reward = weighter.get_weighted_reward(reward_components)
+
+    return weighted_reward, reward_components
+
+
+# -------------------------
+# Public_Toilet State
+# -------------------------
+class Public_Toilet_State:
+    def __init__(self):
+        # Initialize environmental state variables with random values within reasonable ranges
+        self.co2_ppm = np.random.uniform(400, 1501)  # CO2 level in parts per million (ppm)
+        self.nh3_ppm = np.random.uniform(0.032, 5)    # NH3 level in ppm
+        self.h2s_ppm = np.random.uniform(0.00011, 2.1)   # H2S level in ppm
+        self.temperature_c = np.random.uniform(25.5, 31) # Temperature in degrees Celsius
+        self.humidity_percent = np.random.uniform(49.3, 74) # Relative humidity in percentage
+
+        # Equipment status (boolean: ON/OFF)
+        self.exhaust_fan_on = False
+        self.ceiling_fan_on = False
+        self.dehumidifier_on = False
+
+    # Apply action + simulate environment
+    def update_state(self, action):
+        # Update equipment status
+        self.exhaust_fan_on = bool(action['exhaust_fan'])
+        self.ceiling_fan_on = bool(action['ceiling_fan'])
+        self.dehumidifier_on = bool(action['dehumidifier'])
+
+        # Toilet details
+        room_volume = 17.64 * 3.0  # 52.92 m³
+        time_step_hours = 1/60
+
+        # Set ACH value according to exhaust fan status
+        # Reference value:
+        # Off: 0.5 ACH (natural ventilation)
+        # On: 6 ACH (ASHRAE recommended minimum ventilation rate for sanitation facilities)
+        if not self.exhaust_fan_on:
+          ach = 0.5  # Natural ventilation, low air exchange rate
+        elif self.exhaust_fan_on:
+          ach = 6.0
+
+        # Calculate the air exchange rate (m³/h)
+        air_exchange_rate = ach * room_volume  # m³/h
+
+        # Calculate the air exchange rate (the proportion removed by exhaust air) within the time step
+        air_removed_ratio = air_exchange_rate * time_step_hours / room_volume
+        air_removed_ratio = min(air_removed_ratio, 1.0)  # Ensure it does not exceed 100%
+
+        # Initialize generated pollutant amounts
+        co2_generated = 0.0
+        nh3_generated = 0.0
+        h2s_generated = 0.0
+
+        # Generate baseline pollutant amounts
+        # These are constant background sources
+        co2_generated += np.random.uniform(1, 5)
+        nh3_generated += np.random.uniform(0.01, 0.05)
+        h2s_generated += np.random.uniform(0.001, 0.01)
+
+
+        # # Exhaust fan decreases pollutants directly (removed dependency on ACH)
+        # if self.exhaust_fan_on:
+        #     self.co2_ppm -= np.random.uniform(5, 15) # Larger reduction if exhaust fan is on
+        #     self.nh3_ppm -= np.random.uniform(0.05, 0.2)
+        #     self.h2s_ppm -= np.random.uniform(0.005, 0.02)
+        # else:
+        #     self.co2_ppm -= np.random.uniform(0.5, 5) # Smaller natural reduction
+        #     self.nh3_ppm -= np.random.uniform(0.001, 0.05)
+        #     self.h2s_ppm -= np.random.uniform(0.0001, 0.005)
+
+        # update CO2
+        self.co2_ppm = self.co2_ppm * (1 - air_removed_ratio) + co2_generated
+
+        # NH3 update (considering natural decay）
+        natural_decay_nh3 = 0.02  # decays naturally by 2% per minute.
+        self.nh3_ppm = self.nh3_ppm * (1 - air_removed_ratio) * (1 - natural_decay_nh3) + nh3_generated
+
+        # H2S update (considering natural degradation)
+        natural_decay_h2s = 0.03  # decays naturally by 3% per minute.
+        self.h2s_ppm = self.h2s_ppm * (1 - air_removed_ratio) * (1 - natural_decay_h2s) + h2s_generated
+
+        # Ensure pollutants don't go below zero
+        self.co2_ppm = np.clip(self.co2_ppm, 300, 5000)
+        self.nh3_ppm = np.clip(self.nh3_ppm, 0.0, 100)
+        self.h2s_ppm = np.clip(self.h2s_ppm, 0.0, 20)
+
+        # Simulate temperature changes
+        # Natural fluctuation
+        self.temperature_c += np.random.uniform(-0.1, 0.3)
+        # Ceiling fan effect (cooling)
+        if self.ceiling_fan_on:
+            self.temperature_c -= np.random.uniform(0.3, 0.7)
+
+        # Simulate humidity changes
+        # Natural fluctuation
+        self.humidity_percent += np.random.uniform(-0.1, 0.3)
+        # Dehumidifier effect (decreasing humidity)
+        if self.dehumidifier_on:
+            self.humidity_percent -= np.random.uniform(0.5, 1.0)
+
+        # Clip environmental values to reasonable ranges
+        self.temperature_c = np.clip(self.temperature_c, 22, 34)
+        self.humidity_percent = np.clip(self.humidity_percent, 55, 85)
+
+    # --------------------------------
+    # State for RL
+    # --------------------------------
+    def get_current_state(self):
+        # Returns a dictionary of current state variables
+        return {
+            "co2_ppm": self.co2_ppm,
+            "nh3_ppm": self.nh3_ppm,
+            "h2s_ppm": self.h2s_ppm,
+            "temperature_c": self.temperature_c,
+            "humidity_percent": self.humidity_percent,
+        }
+
+    def get_current_state_array(self):
+        """Returns state as numpy array in the order: NH3, H2S, CO2, Temperature, Humidity"""
+        return np.array([
+            self.nh3_ppm,
+            self.h2s_ppm,
+            self.co2_ppm,
+            self.temperature_c,
+            self.humidity_percent
+        ], dtype=np.float32)
+    
+# -------------------------
+# ACTION SPACE
+# -------------------------
+device_states = [0, 1]
+combo = itertools.product(device_states, repeat=3)
 ACTION_SPACE = [
-    "all_off",
-    "exhaust_only",
-    "ceiling_only",
-    "dehum_only",
-    "exhaust_ceiling",
-    "exhaust_dehum",
-    "ceiling_dehum",
-    "all_on"
+    {'exhaust_fan': c[0], 'ceiling_fan': c[1], 'dehumidifier': c[2]}
+    for c in combo
 ]
 
-# =============================
-# 主應用程式
-# =============================
+# -------------------------
+# Public_Toilet Environment
+# -------------------------
+import gymnasium as gym
+from gymnasium import spaces # Import spaces from gymnasium
 
-def main():
-    # 初始化 session state
-    if 'current_step' not in st.session_state:
-        st.session_state.current_step = 0
-    if 'playing' not in st.session_state:
-        st.session_state.playing = False
-    if 'animation_speed' not in st.session_state:
-        st.session_state.animation_speed = 0.5  # 秒為單位
-    if 'last_update_time' not in st.session_state:
-        st.session_state.last_update_time = time.time()
-    
-    # 標題
-    st.title("🚽 公共廁所RL模型視覺化儀表板")
-    st.markdown("載入已訓練的PPO、A2C、SAC、DQN模型，並視覺化其表現")
-    
-    # 側邊欄
-    with st.sidebar:
-        st.header("📂 模型載入")
-        
-        # 模型路徑設定
-        model_dir = st.text_input(
-            "模型目錄路徑",
-            value="./trained_models",
-            help="包含訓練好的模型文件的目錄"
-        )
-        
-        # 模型選擇
-        selected_models = st.multiselect(
-            "選擇要載入的模型",
-            options=["PPO", "A2C", "SAC", "DQN"],
-            default=["PPO", "DQN"]
-        )
-        
-        # 模擬參數
-        st.header("⚙️ 模擬設定")
-        simulation_steps = st.slider(
-            "模擬步數 (分鐘)",
-            min_value=60,
-            max_value=480,
-            value=120,
-            step=30
-        )
-        
-        # 載入按鈕
-        if st.button("🔍 載入並模擬模型", type="primary"):
-            with st.spinner("載入模型中..."):
-                
-                # 載入選定的模型
-                loaded_models = {}
-                for model_name in selected_models:
-                    # 判斷zip檔案
-                    model_path_zip = os.path.join(model_dir, f"{model_name.lower()}_model.zip")
-                    model_path_pkl = os.path.join(model_dir, f"{model_name.lower()}_model.pkl")
-    
-                    if os.path.exists(model_path_zip):
-                        loaded_models[model_name] = load_pretrained_model(model_name, model_path_zip)
-                    elif os.path.exists(model_path_pkl):
-                        loaded_models[model_name] = load_pretrained_model(model_name, model_path_pkl)
-                    else:
-                        st.sidebar.warning(f"⚠️ {model_name} 模型文件不存在，將使用模擬數據")
-                        loaded_models[model_name] = create_mock_model(model_name)
-                
-                st.session_state.loaded_models = loaded_models
-                st.session_state.simulation_steps = simulation_steps
-                
-                # 重置播放狀態
-                st.session_state.current_step = 0
-                st.session_state.playing = True
-                st.session_state.last_update_time = time.time()
-                
-                # 執行模擬
-                simulation_results = {}
-                for model_name, model_info in loaded_models.items():
-                    df = simulate_model_inference(model_info, simulation_steps)
-                    simulation_results[model_name] = df
-                
-                st.session_state.simulation_results = simulation_results
-                
-                # 計算比較數據
-                comparison_data = []
-                for model_name, df in simulation_results.items():
-                    comparison_data.append({
-                        'Model': model_name,
-                        'Total Reward': df['reward'].sum(),
-                        'Avg NH3': df['nh3_ppm'].mean(),
-                        'Avg CO2': df['co2_ppm'].mean(),
-                        'Energy Consumption': df['energy_consumption'].sum(),
-                        'Safety Violations': len(df[df['nh3_ppm'] > 10]),
-                        'Comfort Score': 100 - (abs(df['temperature_c'] - 26).mean() * 2)
-                    })
-                
-                st.session_state.comparison_data = pd.DataFrame(comparison_data)
-                
-            st.success(f"✅ 成功載入 {len(selected_models)} 個模型")
-            st.rerun()  # 重新運行以顯示數據
-    
-    # 檢查是否有載入的模型
-    if 'loaded_models' not in st.session_state:
-        st.info("👈 請在側邊欄選擇模型並點擊『載入並模擬模型』")
-        return
-    
-    # 顯示載入的模型信息
-    st.header("📊 已載入模型")
-    cols = st.columns(len(st.session_state.loaded_models))
-    
-    for idx, (model_name, model_info) in enumerate(st.session_state.loaded_models.items()):
-        with cols[idx]:
-            card_class = f"{model_name.lower()}-card"
-            total_timesteps = model_info['data'].get('total_timesteps', 'N/A')
-            avg_reward = model_info['data'].get('avg_reward', 'N/A')
-            avg_reward_str = f"{avg_reward:.2f}" if isinstance(avg_reward, (int, float)) else avg_reward
-            st.markdown(f"""
-            <div class="model-card {card_class}">
-                <h4>{model_name}</h4>
-                <p><strong>狀態:</strong> {"✅ 已載入" if model_info['loaded'] else "⚠️ 模擬數據"}</p>
-                <p><strong>訓練步數:</strong> {total_timesteps}</p>
-                <p><strong>平均獎勵:</strong> {avg_reward_str}</p>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # 模型選擇切換
-    available_models = list(st.session_state.loaded_models.keys())
-    if 'selected_model' not in st.session_state:
-        st.session_state.selected_model = available_models[0]
-    
-    selected_model = st.selectbox(
-        "選擇要詳細查看的模型",
-        options=available_models,
-        index=available_models.index(st.session_state.selected_model)
-    )
-    st.session_state.selected_model = selected_model
-    df = st.session_state.simulation_results[selected_model]
-    
-    # ============================================
-    # 關鍵修改：使用 st.form 來確保按鈕立即響應
-    # ============================================
-    st.subheader("🎬 動畫控制")
-    
-    # 創建一個 form 來包裹控制按鈕
-    with st.form("animation_control_form"):
-        control_col1, control_col2, control_col3, control_col4 = st.columns(4)
-        
-        with control_col1:
-            play_button = st.form_submit_button("▶️ 播放", use_container_width=True)
-        
-        with control_col2:
-            pause_button = st.form_submit_button("⏸️ 暫停", use_container_width=True)
-        
-        with control_col3:
-            reset_button = st.form_submit_button("⏹️ 重置", use_container_width=True)
-        
-        with control_col4:
-            # 速度控制放在 form 外面，因為它不需要立即響應
+class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
+    metadata = {'render_modes': ['human'], 'render_fps': 4}
+    reward_range = (-float('inf'), float('inf'))
+
+    def __init__(self, episode_length=1440, normalize_states=False, seed=None, k_tuning_method=None, silent=False):
+        super().__init__()
+
+        self.episode_length = episode_length
+        self.normalize_states = normalize_states
+        self.seed = seed
+        self.k_tuning_method = k_tuning_method
+        self.silent = silent # Add silent parameter
+
+        # If a K-value tuning method is specified, update the K-value.
+        if k_tuning_method and not self.silent: # Conditionally print during init
+          print(f"\nApplying K-value tuning method: {k_tuning_method}")
+          update_k_values(k_tuning_method)
+          print("Updated K-values:")
+          # Use standardized key names for printing
+          for key in ['K_CO2', 'K_NH3', 'K_H2S', 'K_TEMPERATURE_COMFORT', 'K_HUMIDITY_COMFORT', 'K_ENERGY_CONSUMPTION']:
+            print(f"{key}: {system_parameters[key]:.6f}")
+        elif k_tuning_method:
+            update_k_values(k_tuning_method) # Update even if silent
+
+        self.reward_weighter = RewardWeighter(num_components=5)
+
+        # Set random seeds
+        if seed is not None:
+            np.random.seed(seed)
+            random.seed(seed)
+
+        # Action space
+        self.action_space_list = ACTION_SPACE
+        self.action_space_size = len(self.action_space_list)
+
+        # Define action_space for Gymnasium compatibility
+        self.action_space = spaces.Discrete(self.action_space_size)
+
+        # State dimensions: [NH3, H2S, CO2, Temperature, Humidity]
+        self.state_dim = 5
+
+        # State standardization range
+        self.state_ranges = {
+            'co2_ppm': (300.0, 5000.0),
+            'nh3_ppm': (0.0, 5.0),
+            'h2s_ppm': (0.0, 5.0),
+            'temperature_c': (22.0, 35.0),
+            'humidity_percent': (50.0, 90.0)
+        }
+
+        # Define observation_space for Gymnasium compatibility
+        if normalize_states:
+            self.observation_space = spaces.Box(
+                low=0.0, high=1.0, shape=(self.state_dim,), dtype=np.float32
+            )
+        else:
+            # These values need to be adjusted to match your actual state ranges
+            self.observation_space = spaces.Box(
+                low=np.array([0.0, 0.0, 300.0, 22.0, 55.0], dtype=np.float32),
+                high=np.array([100.0, 20.0, 5000.0, 34.0, 85.0], dtype=np.float32),
+                dtype=np.float32
+            )
+
+        self.Public_Toilet_state = None
+        self.current_step = 0
+
+        # reset
+        self.reset()
+
+    def _normalize_state(self, state_dict):
+        """Normalize state values to [0, 1] range"""
+        normalized = []
+
+        # NH3
+        nh3_min, nh3_max = self.state_ranges['nh3_ppm']
+        nh3_norm = (state_dict['nh3_ppm'] - nh3_min) / (nh3_max - nh3_min)
+        normalized.append(np.clip(nh3_norm, 0.0, 1.0))
+
+        # H2S
+        h2s_min, h2s_max = self.state_ranges['h2s_ppm']
+        h2s_norm = (state_dict['h2s_ppm'] - h2s_min) / (h2s_max - h2s_min)
+        normalized.append(np.clip(h2s_norm, 0.0, 1.0))
+
+        # CO2
+        co2_min, co2_max = self.state_ranges['co2_ppm']
+        co2_norm = (state_dict['co2_ppm'] - co2_min) / (co2_max - co2_min)
+        normalized.append(np.clip(co2_norm, 0.0, 1.0))
+
+        # Temperature
+        temp_min, temp_max = self.state_ranges['temperature_c']
+        temp_norm = (state_dict['temperature_c'] - temp_min) / (temp_max - temp_min)
+        normalized.append(np.clip(temp_norm, 0.0, 1.0))
+
+        # Humidity
+        hum_min, hum_max = self.state_ranges['humidity_percent']
+        hum_norm = (state_dict['humidity_percent'] - hum_min) / (hum_max - hum_min)
+        normalized.append(np.clip(hum_norm, 0.0, 1.0))
+
+        return np.array(normalized, dtype=np.float32)
+
+    # Reset mechanism
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        if seed is not None:
+            np.random.seed(seed) # Use env-level seed for initial state randomization
+            random.seed(seed)
+
+        self.Public_Toilet_state = Public_Toilet_State()
+        self.current_step = 0
+
+        observation = (self._normalize_state(self.Public_Toilet_state.get_current_state()) if self.normalize_states
+                      else self.Public_Toilet_state.get_current_state_array())
+        info = {'reset_info': 'Environment reset successfully'}
+
+        return observation, info
+
+    # step mechanism
+    def step(self, action_idx):
+    # def step(self, action):
+
+        # Get action from index
+        action = self.action_space_list[action_idx]
+
+        # Update the Public_Toilet_state based on the action
+        self.Public_Toilet_state.update_state(action)
+
+        # Get the new state
+        current_state_dict = self.Public_Toilet_state.get_current_state()
+
+        if self.normalize_states:
+            observation = self._normalize_state(current_state_dict)
+        else:
+            observation = self.Public_Toilet_state.get_current_state_array()
+
+        # Calculate the reward using the dedicated function
+        reward, components = calculate_total_reward(current_state_dict, action, self.reward_weighter)
+
+        # Update reward weights
+        self.reward_weighter.update(components)
+
+        # Print weights (so you can see)
+        if not self.silent:
+            # print("Reward components:", components) # Commented out for cleaner output during training
+            # print("Current weights:", self.reward_weighter.weights) # Commented out for cleaner output during training
             pass
-    
-    # 處理按鈕點擊
-    if play_button:
-        st.session_state.playing = True
-        st.session_state.last_update_time = time.time()
-        st.rerun()
-    
-    if pause_button:
-        st.session_state.playing = False
-        st.rerun()
-    
-    if reset_button:
-        st.session_state.current_step = 0
-        st.session_state.playing = False
-        st.rerun()
-    
-    # 速度控制（放在 form 外面）
-    control_col4_1, control_col4_2 = st.columns([3, 1])
-    with control_col4_1:
-        st.session_state.animation_speed = st.select_slider(
-            "播放速度 (秒/步)",
-            options=[0.1, 0.3, 0.5, 1.0, 2.0],
-            value=st.session_state.animation_speed,
-            key="speed_slider"
-        )
-    with control_col4_2:
-        st.metric("速度", f"{st.session_state.animation_speed}s")
-    
-    # 進度顯示
-    progress_col1, progress_col2, progress_col3 = st.columns([2, 2, 1])
-    
-    with progress_col1:
-        st.metric("當前步數", f"{st.session_state.current_step + 1}")
-    
-    with progress_col2:
-        st.metric("總步數", f"{len(df)}")
-    
-    with progress_col3:
-        progress_percent = (st.session_state.current_step + 1) / len(df) * 100
-        st.metric("完成度", f"{progress_percent:.1f}%")
-    
-    # ============================================
-    # 自動播放邏輯（簡化版本）
-    # ============================================
-    if st.session_state.playing:
-        current_time = time.time()
-        time_elapsed = current_time - st.session_state.last_update_time
-    
-        if time_elapsed >= st.session_state.animation_speed:
-            # 前進一步
-            if st.session_state.current_step < len(df) - 1:
-                st.session_state.current_step += 1
-                st.session_state.last_update_time = current_time
-                # 使用 st.rerun() 而不是 st.experimental_rerun()
-                st.rerun()
-            else:
-                # 到達最後一步，停止播放
-                st.session_state.playing = False
-                st.toast("🎬 模擬播放完成！", icon="✅")
-    
-    # ============================================
-    # 顯示數據和圖表（保持不變）
-    # ============================================
-    
-    # 顯示關鍵指標（使用到當前步的數據）
-    st.header(f"📈 {selected_model} 模型表現")
-    
-    # 獲取當前幀數據
-    current_frame = df.iloc[st.session_state.current_step]
-    partial_df = df.iloc[:st.session_state.current_step+1]
-    
-    # 計算到當前步為止的統計數據
-    total_reward = partial_df['reward'].sum()
-    avg_nh3 = partial_df['nh3_ppm'].mean()
-    avg_co2 = partial_df['co2_ppm'].mean()
-    total_energy = partial_df['energy_consumption'].sum()
-    safety_violations = len(partial_df[partial_df['nh3_ppm'] > 10])
-    comfort_score = 100 - (abs(partial_df['temperature_c'] - 26).mean() * 2 + abs(partial_df['humidity_percent'] - 60).mean())
-    
-    # 顯示指標
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("🏆 累積獎勵", f"{total_reward:.2f}")
-    with col2:
-        nh3_status = "🟢" if current_frame['nh3_ppm'] < 5 else "🟡" if current_frame['nh3_ppm'] < 15 else "🔴"
-        st.metric(f"{nh3_status} 當前NH3", f"{current_frame['nh3_ppm']:.2f} ppm")
-    with col3:
-        co2_status = "🟢" if current_frame['co2_ppm'] < 800 else "🟡" if current_frame['co2_ppm'] < 1500 else "🔴"
-        st.metric(f"{co2_status} 當前CO2", f"{current_frame['co2_ppm']:.0f} ppm")
-    with col4:
-        st.metric("⚡ 累積能耗", f"{total_energy:.1f} kWh")
-    
-    # 顯示當前狀態信息
-    st.markdown(f"""
-    **當前時間:** {current_frame['time_minutes']} 分鐘 | 
-    **當前動作:** {current_frame['action_taken']} | 
-    **使用人數:** {current_frame['user_count']} | 
-    **舒適度評分:** {max(0, comfort_score):.1f}%
-    """)
-    
-    # 圖表顯示（傳入 current_step）
-    tab1, tab2, tab3, tab4 = st.tabs(["污染物濃度", "舒適度", "設備使用", "獎勵曲線"])
-    
-    with tab1:
-        fig1 = create_pollutant_chart(df, st.session_state.current_step)
-        st.plotly_chart(fig1, use_container_width=True)
-    
-    with tab2:
-        fig2 = create_comfort_chart(df, st.session_state.current_step)
-        st.plotly_chart(fig2, use_container_width=True)
-    
-    with tab3:
-        # 修改設備圖表，顯示到當前步的數據
-        partial_equipment_usage = pd.DataFrame({
-            '設備': ['排氣扇', '天花板風扇', '除濕機'],
-            '使用時間 (分鐘)': [
-                partial_df['exhaust_fan'].sum(),
-                partial_df['ceiling_fan'].sum(),
-                partial_df['dehumidifier'].sum()
-            ],
-            '顏色': ['#FF6B6B', '#4ECDC4', '#45B7D1']
-        })
-        
-        fig3 = px.bar(
-            partial_equipment_usage,
-            x='設備',
-            y='使用時間 (分鐘)',
-            color='設備',
-            color_discrete_map={
-                '排氣扇': '#FF6B6B',
-                '天花板風扇': '#4ECDC4',
-                '除濕機': '#45B7D1'
-            },
-            title=f'設備使用時間統計 ({len(partial_df)}/{len(df)} 分鐘)'
-        )
-        fig3.update_layout(height=300, template='plotly_white')
-        st.plotly_chart(fig3, use_container_width=True)
-    
-    with tab4:
-        # 修改獎勵圖表，支持動態顯示
-        fig5 = go.Figure()
-        
-        # 即時獎勵
-        fig5.add_trace(go.Scatter(
-            x=partial_df['time_minutes'],
-            y=partial_df['reward'],
-            mode='lines+markers',
-            name='即時獎勵',
-            line=dict(color='#7209B7', width=2),
-            marker=dict(size=4)
-        ))
-        
-        # 累積獎勵
-        cumulative_reward = partial_df['reward'].cumsum()
-        fig5.add_trace(go.Scatter(
-            x=partial_df['time_minutes'],
-            y=cumulative_reward,
-            mode='lines',
-            name='累積獎勵',
-            line=dict(color='#F72585', width=3)
-        ))
-        
-        # 添加當前位置標記
-        if len(partial_df) > 0:
-            current_time_val = partial_df.iloc[-1]['time_minutes']
-            current_reward = partial_df.iloc[-1]['reward']
-            fig5.add_vline(x=current_time_val, line_dash="dash", line_color="gray", opacity=0.5)
-            fig5.add_trace(go.Scatter(
-                x=[current_time_val],
-                y=[current_reward],
-                mode='markers',
-                name='當前獎勵',
-                marker=dict(size=12, color='#FF0000'),
-                showlegend=False
-            ))
-        
-        fig5.update_layout(
-            title=f'獎勵曲線 ({len(partial_df)}/{len(df)} 分鐘)',
-            xaxis_title='時間 (分鐘)',
-            yaxis_title='獎勵值',
-            height=350,
-            template='plotly_white'
-        )
-        st.plotly_chart(fig5, use_container_width=True)
 
-if __name__ == "__main__":
-    main()
+        # Increment current step
+        self.current_step += 1
+
+        # Determine if the episode is done (terminated or truncated)
+        terminated = False
+        truncated = False
+
+        # Safety termination (e.g., extreme pollutant levels)
+        if (current_state_dict['co2_ppm'] > 5000 or
+            current_state_dict['nh3_ppm'] > 30 or
+            current_state_dict['h2s_ppm'] > 5):
+            terminated = True
+        # Episode limit
+        if self.current_step >= self.episode_length:
+            truncated = True
+
+        info = {
+            'step': self.current_step,
+            'action': action,
+            'state_dict': current_state_dict,
+            'equipment': {
+                'exhaust_fan': self.Public_Toilet_state.exhaust_fan_on,
+                'ceiling_fan': self.Public_Toilet_state.ceiling_fan_on,
+                'dehumidifier': self.Public_Toilet_state.dehumidifier_on,
+            }
+        }
+
+        return observation, reward, terminated, truncated, info
+
+    def render(self):
+        """Display current state"""
+        state_dict = self.Public_Toilet_state.get_current_state()
+        print(f"\nStep {self.current_step}:")
+        print(f"  NH3: {state_dict['nh3_ppm']:.2f} ppm")
+        print(f"  H2S: {state_dict['h2s_ppm']:.3f} ppm")
+        print(f"  CO2: {state_dict['co2_ppm']:.0f} ppm")
+        print(f"  Temp: {state_dict['temperature_c']:.1f}°C")
+        print(f"  Hum: {state_dict['humidity_percent']:.1f}%")
+        print(f"  Equipment: Exhaust={self.Public_Toilet_state.exhaust_fan_on}, "
+              f"Ceiling={self.Public_Toilet_state.ceiling_fan_on}, "
+              f"Dehum={self.Public_Toilet_state.dehumidifier_on}")
+    def get_reward_stats(self):
+        """Get reward statistics"""
+        return self.reward_weighter.get_component_stats()
+
+    def close(self):
+        """Clean up environment"""
+        pass
+
+## Wrapper
+
+class PublicToiletEnvWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+
+        # The original action space is a dict, which we flatten into MultiDiscrete([2,2,2]).
+        # For gymnasium compatibility, ensure the action space is defined using gymnasium.spaces
+        self.action_space = spaces.MultiDiscrete([2, 2, 2])
+
+        # The original observation space is a dict, which we flatten into a Box.
+        # For gymnasium compatibility, ensure the observation space is defined using gymnasium.spaces
+        self.observation_space = spaces.Box(
+            low=0.0,
+            high=1.0,
+            shape=(5,),  # nh3, h2s, co2, temp, hum
+            dtype=np.float32
+        )
+
+    def _flatten_observation(self, obs):
+        """Flatten the dictionary state into a vector"""
+        # This method is not used directly by the PublicToiletEnvWrapper.step or reset anymore
+        # as the wrapped ToiletEnv now returns an array directly.
+        # However, keeping it for clarity if the underlying env ever changes its output.
+        if isinstance(obs, dict): # If the obs is a dict, flatten it
+            flat_obs = np.array([
+                obs['nh3_ppm'],
+                obs['h2s_ppm'],
+                obs['co2_ppm'],
+                obs['temperature_c'],
+                obs['humidity_percent']
+            ], dtype=np.float32)
+            return flat_obs
+        return obs # Otherwise, assume it's already flat (e.g., from normalize_states)
+
+    # Helper to find the integer index for a given action dict
+    def _get_action_index(self, action_dict):
+        for idx, env_action_dict in enumerate(self.env.action_space_list):
+            if env_action_dict == action_dict:
+                return idx
+        raise ValueError(f"Action dictionary {action_dict} not found in environment's action space list.")
+
+    def step(self, action):
+        # MultiDiscrete action (e.g., np.array([0, 1, 0])) -> dict
+        # Ensure 'action' is treated as a 1D array if it comes as (1, N)
+        if isinstance(action, np.ndarray) and action.ndim > 1:
+            action = action.flatten()
+
+        action_dict = {
+            'exhaust_fan': int(action[0]),
+            'ceiling_fan': int(action[1]),
+            'dehumidifier': int(action[2])
+        }
+
+        # Get the integer index for the underlying ToiletEnv
+        action_idx = self._get_action_index(action_dict)
+
+        # The wrapped environment (ToiletEnv) now returns (obs, reward, terminated, truncated, info)
+        obs, reward, terminated, truncated, info = self.env.step(action_idx)
+        # The obs from the wrapped env is already an array, no need to flatten again if normalize_states is true
+        # If normalize_states is false, it's also an array.
+        # flat_obs = self._flatten_observation(obs) # This line might be redundant if ToiletEnv is properly configured
+        return obs, reward, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        # The obs from the wrapped env is already an array.
+        # flat_obs = self._flatten_observation(obs) # This line might be redundant if ToiletEnv is properly configured
+        return obs, info
+    
+def evaluate_policy_metrics(model, env, n_episodes=300, window=300):
+    episode_rewards = []
+
+    for ep in range(n_episodes):
+        obs, _ = env.reset()
+        done = False
+        total_reward = 0
+
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            total_reward += reward
+
+        episode_rewards.append(total_reward)
+
+    rewards = np.array(episode_rewards)
+
+    # ---- Metrics ----
+    avg_reward = np.mean(rewards)                  # average episodic reward
+    cumulative_reward = np.sum(rewards)             # cumulative reward
+
+    # Learning stability (variance over last window)
+    if len(rewards) >= window:
+        stability_variance = np.var(rewards[-window:])
+    else:
+        stability_variance = np.var(rewards)
+
+    return {
+        "avg_episode_reward": avg_reward,
+        "cumulative_reward": cumulative_reward,
+        "reward_variance": stability_variance,
+        "all_rewards": rewards
+    }
+
+# -------------------------
+# Streamlit page config
+# -------------------------
+st.set_page_config(page_title="Public Toilet PPO Evaluation", layout="wide")
+st.title("🚻 Public Toilet PPO Evaluation Dashboard")
+
+# -------------------------
+# Sidebar settings
+# -------------------------
+episode_length = st.sidebar.slider("Episode Length", min_value=240, max_value=1440, step=120, value=1440)
+normalize_states = st.sidebar.checkbox("Normalize States", value=True)
+seed = st.sidebar.number_input("Random Seed", value=42, step=1)
+run_button = st.sidebar.button("▶️ Run PPO Evaluation")
+
+# -------------------------
+# PPO model path
+# -------------------------
+MODEL_PATH = "trained_models/ppo_model.zip"
+
+# -------------------------
+# Cached environment
+# -------------------------
+@st.cache_resource
+def make_env():
+    env = ToiletEnv(episode_length=episode_length, normalize_states=normalize_states, seed=seed, silent=True)
+    env = PublicToiletEnvWrapper(env)
+    return Monitor(env)
+
+env = make_env()
+
+# -------------------------
+# Load PPO model
+# -------------------------
+@st.cache_resource
+def load_ppo_model():
+    return PPO.load(MODEL_PATH, env=env)
+
+# -------------------------
+# Run Evaluation
+# -------------------------
+if run_button:
+    st.info("Running PPO evaluation...")
+
+    try:
+        model = load_ppo_model()
+    except Exception as e:
+        st.error(f"❌ Failed to load PPO model: {e}")
+        st.stop()
+
+    # Placeholders
+    reward_placeholder = st.empty()
+    state_placeholder = st.empty()
+    fig_placeholder = st.empty()
+
+    # Initialize plotting data
+    rewards = []
+    timesteps = []
+
+    # Reset environment
+    obs, _ = env.reset()
+    done = False
+    total_reward = 0.0
+    step = 0
+
+    # Plotly figure setup
+    fig = go.Figure()
+    fig.update_layout(
+        title="Cumulative Reward over Time",
+        xaxis_title="Timestep",
+        yaxis_title="Cumulative Reward",
+        xaxis=dict(range=[0, episode_length]),
+        yaxis=dict(range=[0, 1]),
+    )
+    # reward line
+    fig.add_trace(go.Scatter(x=[], y=[], mode='lines', name='Cumulative Reward'))
+    # current step dashed line
+    fig.add_trace(go.Scatter(x=[0,0], y=[0,0], mode='lines', line=dict(dash='dash', color='red'), name='Current Step'))
+
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = env.step(action)
+        total_reward += reward
+        done = terminated or truncated
+        step = info['step']
+
+        # Append data
+        rewards.append(total_reward)
+        timesteps.append(step)
+
+        # Update state display
+        state_placeholder.markdown(
+            f"**Timestep:** {step} / {episode_length}  \n"
+            f"**NH3:** {info['state_dict']['nh3_ppm']:.3f} ppm  \n"
+            f"**H2S:** {info['state_dict']['h2s_ppm']:.3f} ppm  \n"
+            f"**CO2:** {info['state_dict']['co2_ppm']:.0f} ppm  \n"
+            f"**Temp:** {info['state_dict']['temperature_c']:.1f} °C  \n"
+            f"**Humidity:** {info['state_dict']['humidity_percent']:.1f} %"
+        )
+
+        # Update plot
+        fig.data[0].x = timesteps
+        fig.data[0].y = rewards
+        fig.data[1].x = [step, step]
+        fig.data[1].y = [0, max(rewards)*1.1]
+        fig_placeholder.plotly_chart(fig, use_container_width=True)
+
+        # Wait 1 second for real-time effect
+        time.sleep(1)
+
+    st.success(f"🎯 PPO Evaluation Finished | Total Reward = {total_reward:.2f}")
