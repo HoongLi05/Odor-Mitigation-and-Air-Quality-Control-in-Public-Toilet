@@ -791,6 +791,16 @@ if "episode_rewards" not in st.session_state:
     st.session_state.episode_rewards = []
 if "episode_numbers" not in st.session_state:
     st.session_state.episode_numbers = []
+if "pollutant_rewards" not in st.session_state:
+    st.session_state.pollutant_rewards = []
+if "comfort_rewards" not in st.session_state:
+    st.session_state.comfort_rewards = []
+if "energy_rewards" not in st.session_state:
+    st.session_state.energy_rewards = []
+
+if "component_table" not in st.session_state:
+    st.session_state.component_table = []
+
 
 # -----------------------------
 # Load PPO Model
@@ -818,7 +828,29 @@ model = load_ppo_model()
 # Placeholders
 # -----------------------------
 state_placeholder = st.empty()
-fig_placeholder = st.empty()
+col1, col2 = st.columns(2)
+col3, col4 = st.columns(2)
+
+fig_total = go.Figure()
+fig_pollutant = go.Figure()
+fig_comfort = go.Figure()
+fig_energy = go.Figure()
+
+def setup_fig(fig, title):
+    fig.update_layout(
+        title=title,
+        xaxis_title="Episode",
+        yaxis_title="Reward",
+        xaxis=dict(range=[0, num_episodes + 1]),
+    )
+    fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers"))
+
+setup_fig(fig_total, "Total Reward per Episode")
+setup_fig(fig_pollutant, "Pollutants Reward (NH3 + H2S + CO2)")
+setup_fig(fig_comfort, "Comfort Reward (Temp + Humidity)")
+setup_fig(fig_energy, "Energy Reward")
+
+
 
 # -----------------------------
 # Plotly Figure
@@ -863,16 +895,71 @@ while st.session_state.current_episode <= num_episodes:
     obs, _ = env.reset()
     done = False
     total_reward = 0.0
+    pollutant_sum = 0.0
+    comfort_sum = 0.0
+    energy_sum = 0.0
+
+    nh3_sum = 0.0
+    h2s_sum = 0.0
+    co2_sum = 0.0
+    temp_sum = 0.0
+    hum_sum = 0.0
+
 
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
         done = terminated or truncated
+        # components order: [co2, nh3, h2s, comfort, energy]
+        co2_r, nh3_r, h2s_r, comfort_r, energy_r = env.env.reward_weighter.component_history and calculate_total_reward(
+            info["state_dict"], info["action"], None
+        )[1]
+
+        pollutant_sum += (co2_r + nh3_r + h2s_r)
+        comfort_sum += comfort_r
+        energy_sum += energy_r
+
+        co2_sum += co2_r
+        nh3_sum += nh3_r
+        h2s_sum += h2s_r
+        temp_sum += comfort_r / 2
+        hum_sum += comfort_r / 2
+
 
     # Save episode data
     st.session_state.episode_rewards.append(total_reward)
     st.session_state.episode_numbers.append(ep)
+    st.session_state.pollutant_rewards.append(pollutant_sum)
+    st.session_state.comfort_rewards.append(comfort_sum)
+    st.session_state.energy_rewards.append(energy_sum)
+
+    st.session_state.component_table.append({
+        "Episode": ep,
+        "NH3 Reward": nh3_sum,
+        "H2S Reward": h2s_sum,
+        "CO2 Reward": co2_sum,
+        "Temperature Reward": temp_sum,
+        "Humidity Reward": hum_sum
+    })
+
+    st.subheader("📊 Reward Breakdown per Episode")
+    st.dataframe(
+        np.array([
+            [
+                row["Episode"],
+                row["NH3 Reward"],
+                row["H2S Reward"],
+                row["CO2 Reward"],
+                row["Temperature Reward"],
+                row["Humidity Reward"]
+            ]
+            for row in st.session_state.component_table
+        ]),
+        use_container_width=True
+)
+
+
 
     # Update state display
     state_placeholder.markdown(
@@ -886,12 +973,23 @@ while st.session_state.current_episode <= num_episodes:
     )
 
     # Update plot
-    fig.data[0].x = st.session_state.episode_numbers
-    fig.data[0].y = st.session_state.episode_rewards
-    y_min, y_max = fig.layout.yaxis.range
-    fig.data[1].x = [ep, ep]
-    fig.data[1].y = [y_min, y_max]
-    fig_placeholder.plotly_chart(fig, use_container_width=True)
+    fig_total.data[0].x = st.session_state.episode_numbers
+    fig_total.data[0].y = st.session_state.episode_rewards
+
+    fig_pollutant.data[0].x = st.session_state.episode_numbers
+    fig_pollutant.data[0].y = st.session_state.pollutant_rewards
+
+    fig_comfort.data[0].x = st.session_state.episode_numbers
+    fig_comfort.data[0].y = st.session_state.comfort_rewards
+
+    fig_energy.data[0].x = st.session_state.episode_numbers
+    fig_energy.data[0].y = st.session_state.energy_rewards
+
+    col1.plotly_chart(fig_total, use_container_width=True)
+    col2.plotly_chart(fig_pollutant, use_container_width=True)
+    col3.plotly_chart(fig_comfort, use_container_width=True)
+    col4.plotly_chart(fig_energy, use_container_width=True)
+
 
     # Increment episode
     st.session_state.current_episode += 1
