@@ -760,7 +760,9 @@ def evaluate_policy_metrics(model, env, n_episodes=300, window=30):
 
             total_reward += reward
 
-            ri = getattr(env.unwrapped, 'reward_info', {"co2": 0, "nh3": 0, "h2s": 0, "comfort": 0, "energy": 0})
+            ri = getattr(env.unwrapped, 'reward_info', None)
+            if ri is None:
+                ri = {"co2": 0, "nh3": 0, "h2s": 0, "comfort": 0, "energy": 0}
 
             # ---- reward components ----
             pollutant_sum += ri["co2"] + ri["nh3"] + ri["h2s"]
