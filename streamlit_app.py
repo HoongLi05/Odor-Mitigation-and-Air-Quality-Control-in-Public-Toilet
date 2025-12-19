@@ -977,7 +977,7 @@ while st.session_state.current_episode <= num_episodes:
         obs, reward, terminated, truncated, info = env.step(action)
         
         # Get reward components from environment
-        ri = env.unwrapped.reward_info
+        ri = getattr(env.unwrapped, 'reward_info', {"co2": 0, "nh3": 0, "h2s": 0, "comfort": 0, "energy": 0})
         
         # Calculate rewards for different categories
         pollutants_reward_step = ri["co2"] + ri["nh3"] + ri["h2s"]  # CO2 + NH3 + H2S
