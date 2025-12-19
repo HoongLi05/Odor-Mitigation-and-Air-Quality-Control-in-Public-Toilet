@@ -882,15 +882,19 @@ if replay_button:
     st.session_state.current_episode = 1
     st.session_state.episode_rewards = []
     st.session_state.episode_numbers = []
+    st.session_state.pollutant_rewards = []
+    st.session_state.comfort_rewards = []
+    st.session_state.energy_rewards = []
+    st.session_state.component_table = []
+
 
 # -----------------------------
 # Run Evaluation Loop
 # -----------------------------
-while st.session_state.current_episode <= num_episodes:
+for ep in range(1, num_episodes + 1):
     if not st.session_state.is_playing:
         break
 
-    ep = st.session_state.current_episode
 
     obs, _ = env.reset()
     done = False
@@ -929,7 +933,6 @@ while st.session_state.current_episode <= num_episodes:
         temp_sum += comfort_r / 2.0
         hum_sum += comfort_r / 2.0
 
-
     # Save episode data
     st.session_state.episode_rewards.append(total_reward)
     st.session_state.episode_numbers.append(ep)
@@ -937,32 +940,14 @@ while st.session_state.current_episode <= num_episodes:
     st.session_state.comfort_rewards.append(comfort_sum)
     st.session_state.energy_rewards.append(energy_sum)
 
-    st.session_state.component_table.append({
-        "Episode": ep,
-        "NH3 Reward": nh3_sum,
-        "H2S Reward": h2s_sum,
-        "CO2 Reward": co2_sum,
-        "Temperature Reward": temp_sum,
-        "Humidity Reward": hum_sum
-    })
-
-    st.subheader("📊 Reward Breakdown per Episode")
-    st.dataframe(
-        np.array([
-            [
-                row["Episode"],
-                row["NH3 Reward"],
-                row["H2S Reward"],
-                row["CO2 Reward"],
-                row["Temperature Reward"],
-                row["Humidity Reward"]
-            ]
-            for row in st.session_state.component_table
-        ]),
-        use_container_width=True
-)
-
-
+    # st.session_state.component_table.append({
+    #     "Episode": ep,
+    #     "NH3 Reward": nh3_sum,
+    #     "H2S Reward": h2s_sum,
+    #     "CO2 Reward": co2_sum,
+    #     "Temperature Reward": temp_sum,
+    #     "Humidity Reward": hum_sum
+    # })
 
     # Update state display
     state_placeholder.markdown(
@@ -988,14 +973,84 @@ while st.session_state.current_episode <= num_episodes:
     fig_energy.data[0].x = st.session_state.episode_numbers
     fig_energy.data[0].y = st.session_state.energy_rewards
 
-    col1.plotly_chart(fig_total, use_container_width=True)
-    col2.plotly_chart(fig_pollutant, use_container_width=True)
-    col3.plotly_chart(fig_comfort, use_container_width=True)
-    col4.plotly_chart(fig_energy, use_container_width=True)
 
 
-    # Increment episode
-    st.session_state.current_episode += 1
+    
     time.sleep(speed)
 
+st.session_state.component_table.append({
+    "Episode": ep,
+    "NH3 reward": nh3_sum,
+    "H2S reward": h2s_sum,
+    "CO2 reward": co2_sum,
+    "Total Pollutants Reward": pollutant_sum,
+    "Comfort reward": comfort_sum,
+    "Energy reward": energy_sum,
+    "Total reward": total_reward
+})
+
+import pandas as pd
+
+df = pd.DataFrame(
+    st.session_state.component_table,
+    columns=[
+        "Episode",
+        "NH3 reward",
+        "H2S reward",
+        "CO2 reward",
+        "Total Pollutants Reward",
+        "Comfort reward",
+        "Energy reward",
+        "Total reward"
+    ]
+)
+
+st.subheader("📋 Reward Breakdown Table")
+st.dataframe(df, use_container_width=True)
+
+
+st.subheader("📊 Reward Breakdown per Episode")
+st.dataframe(
+    np.array([
+        [
+            row["Episode"],
+            row["NH3 Reward"],
+            row["H2S Reward"],
+            row["CO2 Reward"],
+            row["Temperature Reward"],
+            row["Humidity Reward"]
+        ]
+        for row in st.session_state.component_table
+    ]),
+    use_container_width=True
+)
+
+col1.plotly_chart(fig_total, use_container_width=True)
+col2.plotly_chart(fig_pollutant, use_container_width=True)
+col3.plotly_chart(fig_comfort, use_container_width=True)
+col4.plotly_chart(fig_energy, use_container_width=True)
+
+
 st.success("✅ PPO Evaluation Finished!")
+
+# st.subheader("📊 Reward Breakdown per Episode")
+# st.dataframe(
+#     np.array([
+#         [
+#             row["Episode"],
+#             row["NH3 Reward"],
+#             row["H2S Reward"],
+#             row["CO2 Reward"],
+#             row["Temperature Reward"],
+#             row["Humidity Reward"]
+#         ]
+#         for row in st.session_state.component_table
+#     ]),
+#     use_container_width=True
+# )
+
+# col1.plotly_chart(fig_total, use_container_width=True)
+# col2.plotly_chart(fig_pollutant, use_container_width=True)
+# col3.plotly_chart(fig_comfort, use_container_width=True)
+# col4.plotly_chart(fig_energy, use_container_width=True)
+
