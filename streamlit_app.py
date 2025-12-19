@@ -595,13 +595,24 @@ class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
         # Calculate the reward using the dedicated function
         reward, components = calculate_total_reward(current_state_dict, action, self.reward_weighter)
 
-        self.reward_info = {
-            "co2": components[0],
-            "nh3": components[1],
-            "h2s": components[2],
-            "comfort": components[3],
-            "energy": components[4],
+        info = {
+            'step': self.current_step,
+            'action': action,
+            'state_dict': current_state_dict,
+            'equipment': {
+                'exhaust_fan': self.Public_Toilet_state.exhaust_fan_on,
+                'ceiling_fan': self.Public_Toilet_state.ceiling_fan_on,
+                'dehumidifier': self.Public_Toilet_state.dehumidifier_on,
+        },
+        'reward_components': {
+            'co2': components[0],
+            'nh3': components[1],
+            'h2s': components[2],
+            'comfort': components[3],
+            'energy': components[4],
         }
+    }
+
 
         # Update reward weights
         self.reward_weighter.update(components)
@@ -760,9 +771,13 @@ def evaluate_policy_metrics(model, env, n_episodes=300, window=30):
 
             total_reward += reward
 
-            ri = getattr(env.unwrapped, 'reward_info', None)
-            if ri is None:
-                ri = {"co2": 0, "nh3": 0, "h2s": 0, "comfort": 0, "energy": 0}
+            ri = info.get('reward_components', {
+                    "co2": 0,
+                    "nh3": 0,
+                    "h2s": 0,
+                    "comfort": 0,
+                    "energy": 0
+            })
 
             # ---- reward components ----
             pollutant_sum += ri["co2"] + ri["nh3"] + ri["h2s"]
