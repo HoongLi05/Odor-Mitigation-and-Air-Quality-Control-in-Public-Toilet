@@ -940,14 +940,14 @@ for ep in range(1, num_episodes + 1):
     st.session_state.comfort_rewards.append(comfort_sum)
     st.session_state.energy_rewards.append(energy_sum)
 
-    # st.session_state.component_table.append({
-    #     "Episode": ep,
-    #     "NH3 Reward": nh3_sum,
-    #     "H2S Reward": h2s_sum,
-    #     "CO2 Reward": co2_sum,
-    #     "Temperature Reward": temp_sum,
-    #     "Humidity Reward": hum_sum
-    # })
+    st.session_state.component_table.append({
+        "Episode": ep,
+        "NH3 Reward": nh3_sum,
+        "H2S Reward": h2s_sum,
+        "CO2 Reward": co2_sum,
+        "Temperature Reward": temp_sum,
+        "Humidity Reward": hum_sum
+    })
 
     # Update state display
     state_placeholder.markdown(
@@ -978,16 +978,7 @@ for ep in range(1, num_episodes + 1):
     
     time.sleep(speed)
 
-st.session_state.component_table.append({
-    "Episode": ep,
-    "NH3 reward": nh3_sum,
-    "H2S reward": h2s_sum,
-    "CO2 reward": co2_sum,
-    "Total Pollutants Reward": pollutant_sum,
-    "Comfort reward": comfort_sum,
-    "Energy reward": energy_sum,
-    "Total reward": total_reward
-})
+# git
 
 import pandas as pd
 
