@@ -911,10 +911,13 @@ while st.session_state.current_episode <= num_episodes:
         obs, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
         done = terminated or truncated
-        # components order: [co2, nh3, h2s, comfort, energy]
-        co2_r, nh3_r, h2s_r, comfort_r, energy_r = env.env.reward_weighter.component_history and calculate_total_reward(
-            info["state_dict"], info["action"], None
-        )[1]
+        _, components = calculate_total_reward(
+        info["state_dict"],
+        info["action"],
+        weighter=None
+    )
+
+        co2_r, nh3_r, h2s_r, comfort_r, energy_r = components
 
         pollutant_sum += (co2_r + nh3_r + h2s_r)
         comfort_sum += comfort_r
@@ -923,8 +926,8 @@ while st.session_state.current_episode <= num_episodes:
         co2_sum += co2_r
         nh3_sum += nh3_r
         h2s_sum += h2s_r
-        temp_sum += comfort_r / 2
-        hum_sum += comfort_r / 2
+        temp_sum += comfort_r / 2.0
+        hum_sum += comfort_r / 2.0
 
 
     # Save episode data
