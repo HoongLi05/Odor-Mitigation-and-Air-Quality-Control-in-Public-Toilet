@@ -1,6 +1,6 @@
 import streamlit as st
 import numpy as np
-
+import pandas as pd
 from stable_baselines3 import PPO, DQN, SAC, A2C
 from stable_baselines3.common.monitor import Monitor
 import itertools
@@ -10,37 +10,35 @@ import numpy as np
 from gymnasium import spaces
 import time
 import plotly.graph_objects as go
-
+import plotly.subplots as sp
 
 
 # -------------------------
 # Configuration
 # -------------------------
-
+LOAD_MODEL = False
 
 system_parameters = {
     # Power ratings in Watts
     'POWER_EXHAUST_FAN_W': 55,
-    'POWER_CEILING_FAN_W': 42.5,
+    'POWER_CEILING_FAN_W': 40,
     'POWER_DEHUMIDIFIER_W': 500,
 
     # Threshold values for environmental parameters
-    'THRESHOLD_CO2_PPM_MIN': 400,
-    'THRESHOLD_CO2_PPM1': 800,
-    'THRESHOLD_CO2_PPM2': 1000,
+    'THRESHOLD_CO2_PPM_MIN': 800,
+    'THRESHOLD_CO2_PPM_MID': 1000,
     'THRESHOLD_CO2_PPM_MAX': 1500,
 
     # NH3 Thresholds
     'NH3_THRESHOLD_PPM_MIN': 0.032,
-    'NH3_THRESHOLD_PPM1': 3,
-    'NH3_THRESHOLD_PPM_MAX': 5,
+    'NH3_THRESHOLD_PPM_MAX': 1.6,
 
     # H2S Thresholds
-    'H2S_THRESHOLD_PPM1': 0.01,
-    'H2S_THRESHOLD_PPM2': 1.5,
+    'H2S_THRESHOLD_PPM_MIN': 0.01,
+    'H2S_THRESHOLD_PPM_MAX': 1.5,
 
     'THRESHOLD_TEMPERATURE_C': {
-        'LOW': 28,              # Degrees Celsius
+        'LOW': 28,                # Degrees Celsius
         'HIGH': 30.5              # Degrees Celsius
     },
     'THRESHOLD_HUMIDITY_PERCENT': {
@@ -69,25 +67,25 @@ print(system_parameters)
 def normalize_k_values():
   """K value normalized based on benchmark value"""
   benchmarks = {
-      'CO2': 1000,
-      'NH3': 10,
+      'CO2': 500.0,
+      'NH3': 1.4,
       'H2S': 0.5,
-      'Temperature': 5,
-      'Humidity': 20,
-      'Energy':100
+      'Temperature': 3.0,
+      'Humidity': 15.0,
+      'Energy': 150
   }
 
   target_range = 1.0
   k_values = {}
 
   #Normalization of secondary penalties
-  k_values['K_CO2'] = target_range / (benchmarks['CO2'] ** 2)
-  k_values['K_NH3'] = target_range / (benchmarks['NH3'] ** 2)
-  k_values['K_H2S'] = target_range / (benchmarks['H2S'] ** 2)
+  k_values['K_CO2'] = target_range / (benchmarks['CO2'] ** 1.5)
+  k_values['K_NH3'] = target_range / (benchmarks['NH3'] ** 1.5)
+  k_values['K_H2S'] = target_range / (benchmarks['H2S'] ** 1.5)
   # Standardize key names for consistency
-  k_values['K_TEMPERATURE_COMFORT'] = target_range / (benchmarks['Temperature'] ** 2)
-  k_values['K_HUMIDITY_COMFORT'] = target_range / (benchmarks['Humidity'] ** 2)
-  k_values['K_ENERGY_CONSUMPTION'] = target_range / (benchmarks['Energy'] ** 2)
+  k_values['K_TEMPERATURE_COMFORT'] = target_range / (benchmarks['Temperature'] ** 1.5)
+  k_values['K_HUMIDITY_COMFORT'] = target_range / (benchmarks['Humidity'] ** 1.5)
+  k_values['K_ENERGY_CONSUMPTION'] = target_range / (benchmarks['Energy'] ** 1.5)
 
   return k_values
 
@@ -100,7 +98,7 @@ def set_k_by_priority():
       'NH3': 5,
       'H2S': 5,
       'TEMPERATURE_COMFORT': 2,
-      'HUMIDITY_COMFORT': 3,
+      'HUMIDITY_COMFORT': 2,
       'ENERGY_CONSUMPTION':1
   }
 
@@ -144,6 +142,7 @@ def update_k_values(method='priority'):
   for key, value in new_k_values.items():
     system_parameters[key] = value
   print("K values updated successfully.")
+
 
 # -------------------------
 # Reward Weighting System
@@ -192,14 +191,15 @@ class RewardWeighter:
             }
         return stats
 
+
 # -------------------------
 # Reward Functions
 # -------------------------
 def calculate_co2_reward(current_co2_ppm):
 
-    co2_min = system_parameters['THRESHOLD_CO2_PPM1']      # 800 ppm
-    co2_mid = system_parameters['THRESHOLD_CO2_PPM2']      # 1000 ppm
-    co2_max = system_parameters['THRESHOLD_CO2_PPM_MAX']   # 1500 ppm
+    co2_min = system_parameters['THRESHOLD_CO2_PPM_MIN']      # 800 ppm
+    co2_mid = system_parameters['THRESHOLD_CO2_PPM_MID']      # 1000 ppm
+    co2_max = system_parameters['THRESHOLD_CO2_PPM_MAX']      # 1500 ppm
     k_co2 = system_parameters['K_CO2']
 
     # Region 1: CO2 ≤ 800 → reward = +1
@@ -220,8 +220,8 @@ def calculate_co2_reward(current_co2_ppm):
 def calculate_nh3_reward(current_nh3_ppm):
 
     k_nh3 = system_parameters.get('K_NH3', 0.05)
-    thr_low = system_parameters.get('NH3_THRESHOLD_PPM1', 3.0)
-    thr_high = system_parameters.get('NH3_THRESHOLD_PPM_MAX', 5.0)
+    thr_low = system_parameters.get('NH3_THRESHOLD_PPM_MIN', 1.6)
+    thr_high = system_parameters.get('NH3_THRESHOLD_PPM_MAX', 3.0)
 
     # Safe clipping (in case sensor reading is weird)
     nh3 = float(np.clip(current_nh3_ppm, 0.0, 1e6))
@@ -235,8 +235,8 @@ def calculate_nh3_reward(current_nh3_ppm):
 
 def calculate_h2s_reward(current_h2s_ppm):
     k_h2s = system_parameters['K_H2S']
-    thr_low = system_parameters['H2S_THRESHOLD_PPM1']   # 0.01 ppm
-    thr_high = system_parameters['H2S_THRESHOLD_PPM2']  # 1.5 ppm
+    thr_low = system_parameters['H2S_THRESHOLD_PPM_MIN']   # 0.01 ppm
+    thr_high = system_parameters['H2S_THRESHOLD_PPM_MAX']  # 1.5 ppm
 
     h2s = float(np.clip(current_h2s_ppm, 0.0, 1e6))
 
@@ -326,11 +326,11 @@ def calculate_total_reward(state, action, weighter=None):
 class Public_Toilet_State:
     def __init__(self):
         # Initialize environmental state variables with random values within reasonable ranges
-        self.co2_ppm = np.random.uniform(400, 1501)  # CO2 level in parts per million (ppm)
-        self.nh3_ppm = np.random.uniform(0.032, 5)    # NH3 level in ppm
+        self.co2_ppm = np.random.uniform(400.0, 1501.0)  # CO2 level in parts per million (ppm)
+        self.nh3_ppm = np.random.uniform(0.032, 5.0)    # NH3 level in ppm
         self.h2s_ppm = np.random.uniform(0.00011, 2.1)   # H2S level in ppm
-        self.temperature_c = np.random.uniform(25.5, 31) # Temperature in degrees Celsius
-        self.humidity_percent = np.random.uniform(49.3, 74) # Relative humidity in percentage
+        self.temperature_c = np.random.uniform(25.5, 31.0) # Temperature in degrees Celsius
+        self.humidity_percent = np.random.uniform(49.3, 74.0) # Relative humidity in percentage
 
         # Equipment status (boolean: ON/OFF)
         self.exhaust_fan_on = False
@@ -398,9 +398,9 @@ class Public_Toilet_State:
         self.h2s_ppm = self.h2s_ppm * (1 - air_removed_ratio) * (1 - natural_decay_h2s) + h2s_generated
 
         # Ensure pollutants don't go below zero
-        self.co2_ppm = np.clip(self.co2_ppm, 300, 5000)
-        self.nh3_ppm = np.clip(self.nh3_ppm, 0.0, 100)
-        self.h2s_ppm = np.clip(self.h2s_ppm, 0.0, 20)
+        self.co2_ppm = np.clip(self.co2_ppm, 300, 2000)
+        self.nh3_ppm = np.clip(self.nh3_ppm, 0.0, 10.0)
+        self.h2s_ppm = np.clip(self.h2s_ppm, 0.0, 5.0)
 
         # Simulate temperature changes
         # Natural fluctuation
@@ -418,7 +418,7 @@ class Public_Toilet_State:
 
         # Clip environmental values to reasonable ranges
         self.temperature_c = np.clip(self.temperature_c, 22, 34)
-        self.humidity_percent = np.clip(self.humidity_percent, 55, 85)
+        self.humidity_percent = np.clip(self.humidity_percent, 45, 80)
 
     # --------------------------------
     # State for RL
@@ -442,6 +442,7 @@ class Public_Toilet_State:
             self.temperature_c,
             self.humidity_percent
         ], dtype=np.float32)
+
     
 # -------------------------
 # ACTION SPACE
@@ -453,17 +454,15 @@ ACTION_SPACE = [
     for c in combo
 ]
 
+
 # -------------------------
 # Public_Toilet Environment
 # -------------------------
-import gymnasium as gym
-from gymnasium import spaces # Import spaces from gymnasium
-
 class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
     metadata = {'render_modes': ['human'], 'render_fps': 4}
     reward_range = (-float('inf'), float('inf'))
 
-    def __init__(self, episode_length=1440, normalize_states=False, seed=None, k_tuning_method=None, silent=False):
+    def __init__(self, episode_length=1440, normalize_states=False, seed=42, k_tuning_method=None, silent=False):
         super().__init__()
 
         self.episode_length = episode_length
@@ -502,11 +501,11 @@ class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
 
         # State standardization range
         self.state_ranges = {
-            'co2_ppm': (300.0, 5000.0),
-            'nh3_ppm': (0.0, 5.0),
+            'co2_ppm': (300.0, 2000.0),
+            'nh3_ppm': (0.0, 10.0),
             'h2s_ppm': (0.0, 5.0),
-            'temperature_c': (22.0, 35.0),
-            'humidity_percent': (50.0, 90.0)
+            'temperature_c': (22.0, 34.0),
+            'humidity_percent': (45.0, 80.0)
         }
 
         # Define observation_space for Gymnasium compatibility
@@ -517,8 +516,8 @@ class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
         else:
             # These values need to be adjusted to match your actual state ranges
             self.observation_space = spaces.Box(
-                low=np.array([0.0, 0.0, 300.0, 22.0, 55.0], dtype=np.float32),
-                high=np.array([100.0, 20.0, 5000.0, 34.0, 85.0], dtype=np.float32),
+                low=np.array([0.0, 0.0, 300.0, 22.0, 45.0], dtype=np.float32),
+                high=np.array([10.0, 5.0, 2000.0, 34.0, 80.0], dtype=np.float32),
                 dtype=np.float32
             )
 
@@ -596,6 +595,14 @@ class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
         # Calculate the reward using the dedicated function
         reward, components = calculate_total_reward(current_state_dict, action, self.reward_weighter)
 
+        self.reward_info = {
+            "co2": components[0],
+            "nh3": components[1],
+            "h2s": components[2],
+            "comfort": components[3],
+            "energy": components[4],
+        }
+
         # Update reward weights
         self.reward_weighter.update(components)
 
@@ -613,8 +620,8 @@ class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
         truncated = False
 
         # Safety termination (e.g., extreme pollutant levels)
-        if (current_state_dict['co2_ppm'] > 5000 or
-            current_state_dict['nh3_ppm'] > 30 or
+        if (current_state_dict['co2_ppm'] > 2000 or
+            current_state_dict['nh3_ppm'] > 10 or
             current_state_dict['h2s_ppm'] > 5):
             terminated = True
         # Episode limit
@@ -638,9 +645,9 @@ class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
         """Display current state"""
         state_dict = self.Public_Toilet_state.get_current_state()
         print(f"\nStep {self.current_step}:")
-        print(f"  NH3: {state_dict['nh3_ppm']:.2f} ppm")
-        print(f"  H2S: {state_dict['h2s_ppm']:.3f} ppm")
-        print(f"  CO2: {state_dict['co2_ppm']:.0f} ppm")
+        print(f"  NH3: {state_dict['nh3_ppm']:.6f} ppm")
+        print(f"  H2S: {state_dict['h2s_ppm']:.6f} ppm")
+        print(f"  CO2: {state_dict['co2_ppm']:.6f} ppm")
         print(f"  Temp: {state_dict['temperature_c']:.1f}°C")
         print(f"  Hum: {state_dict['humidity_percent']:.1f}%")
         print(f"  Equipment: Exhaust={self.Public_Toilet_state.exhaust_fan_on}, "
@@ -654,8 +661,10 @@ class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
         """Clean up environment"""
         pass
 
-## Wrapper
 
+# -------------------------
+# Wrapper
+# -------------------------
 class PublicToiletEnvWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
@@ -724,38 +733,58 @@ class PublicToiletEnvWrapper(gym.Wrapper):
         # flat_obs = self._flatten_observation(obs) # This line might be redundant if ToiletEnv is properly configured
         return obs, info
     
-def evaluate_policy_metrics(model, env, n_episodes=300, window=300):
+
+# -------------------------
+# Evaluate Policy Metrics
+# ------------------------- 
+def evaluate_policy_metrics(model, env, n_episodes=300, window=30):
     episode_rewards = []
+
+    pollutant_ep = []
+    comfort_ep   = []   # NEW
+    energy_ep    = []   # NEW
 
     for ep in range(n_episodes):
         obs, _ = env.reset()
         done = False
+
         total_reward = 0
+        pollutant_sum = 0
+        comfort_sum   = 0   # NEW
+        energy_sum    = 0   # NEW
 
         while not done:
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
+
             total_reward += reward
 
+            ri = env.unwrapped.reward_info
+
+            # ---- reward components ----
+            pollutant_sum += ri["co2"] + ri["nh3"] + ri["h2s"]
+            comfort_sum   += ri["comfort"]
+            energy_sum    += ri["energy"]
+
         episode_rewards.append(total_reward)
+        pollutant_ep.append(pollutant_sum)
+        comfort_ep.append(comfort_sum)
+        energy_ep.append(energy_sum)
 
     rewards = np.array(episode_rewards)
 
-    # ---- Metrics ----
-    avg_reward = np.mean(rewards)                  # average episodic reward
-    cumulative_reward = np.sum(rewards)             # cumulative reward
-
-    # Learning stability (variance over last window)
-    if len(rewards) >= window:
-        stability_variance = np.var(rewards[-window:])
-    else:
-        stability_variance = np.var(rewards)
-
     return {
-        "avg_episode_reward": avg_reward,
-        "cumulative_reward": cumulative_reward,
-        "reward_variance": stability_variance,
+        # ---- overall ----
+        "avg_episode_reward": np.mean(rewards),
+        "cumulative_reward": np.sum(rewards),
+        "reward_variance": np.var(rewards[-window:]) if len(rewards) >= window else np.var(rewards),
+
+        # ---- decomposed averages ----
+        "avg_pollutant_reward": np.mean(pollutant_ep),
+        "avg_comfort_reward":   np.mean(comfort_ep),
+        "avg_energy_reward":    np.mean(energy_ep),
+
         "all_rewards": rewards
     }
 
@@ -791,16 +820,14 @@ if "episode_rewards" not in st.session_state:
     st.session_state.episode_rewards = []
 if "episode_numbers" not in st.session_state:
     st.session_state.episode_numbers = []
-if "pollutant_rewards" not in st.session_state:
-    st.session_state.pollutant_rewards = []
+if "pollutants_rewards" not in st.session_state:
+    st.session_state.pollutants_rewards = []
 if "comfort_rewards" not in st.session_state:
     st.session_state.comfort_rewards = []
 if "energy_rewards" not in st.session_state:
     st.session_state.energy_rewards = []
-
-if "component_table" not in st.session_state:
-    st.session_state.component_table = []
-
+if "reward_components_history" not in st.session_state:
+    st.session_state.reward_components_history = []
 
 # -----------------------------
 # Load PPO Model
@@ -828,45 +855,86 @@ model = load_ppo_model()
 # Placeholders
 # -----------------------------
 state_placeholder = st.empty()
-col1, col2 = st.columns(2)
-col3, col4 = st.columns(2)
-
-fig_total = go.Figure()
-fig_pollutant = go.Figure()
-fig_comfort = go.Figure()
-fig_energy = go.Figure()
-
-def setup_fig(fig, title):
-    fig.update_layout(
-        title=title,
-        xaxis_title="Episode",
-        yaxis_title="Reward",
-        xaxis=dict(range=[0, num_episodes + 1]),
-    )
-    fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers"))
-
-setup_fig(fig_total, "Total Reward per Episode")
-setup_fig(fig_pollutant, "Pollutants Reward (NH3 + H2S + CO2)")
-setup_fig(fig_comfort, "Comfort Reward (Temp + Humidity)")
-setup_fig(fig_energy, "Energy Reward")
-
-
+fig_placeholder = st.empty()
+table_placeholder = st.empty()
 
 # -----------------------------
-# Plotly Figure
+# Create subplot figure with 2x2 layout
 # -----------------------------
-fig = go.Figure()
-fig.update_layout(
-    title="Total Reward per Episode",
-    xaxis_title="Episode",
-    yaxis_title="Total Reward",
-    xaxis=dict(range=[0, num_episodes + 1]),
-    yaxis=dict(range=[-10000, 10000]),
+fig = sp.make_subplots(
+    rows=2, cols=2,
+    subplot_titles=(
+        "Total Reward per Episode",
+        "Pollutants Reward (NH3+H2S+CO2) per Episode",
+        "Comfort Reward (Temperature+Humidity) per Episode",
+        "Energy Reward per Episode"
+    ),
+    vertical_spacing=0.15,
+    horizontal_spacing=0.15
 )
-# Blue line for rewards
-fig.add_trace(go.Scatter(x=[], y=[], mode='lines+markers', line=dict(color='blue', width=2), name='Total Reward'))
-# Black dashed vertical line for current episode
-fig.add_trace(go.Scatter(x=[1,1], y=[-1000,1000], mode='lines', line=dict(color='black', dash='dash'), name='Current Episode'))
+
+# Add traces for each subplot
+# Top-left: Total Reward
+fig.add_trace(
+    go.Scatter(x=[], y=[], mode='lines+markers', line=dict(color='blue', width=2), name='Total Reward'),
+    row=1, col=1
+)
+fig.add_trace(
+    go.Scatter(x=[1,1], y=[-1000,1000], mode='lines', line=dict(color='white', dash='dash'), name='Current Episode', showlegend=False),
+    row=1, col=1
+)
+
+# Top-right: Pollutants Reward
+fig.add_trace(
+    go.Scatter(x=[], y=[], mode='lines+markers', line=dict(color='red', width=2), name='Pollutants Reward'),
+    row=1, col=2
+)
+fig.add_trace(
+    go.Scatter(x=[1,1], y=[-1000,1000], mode='lines', line=dict(color='white', dash='dash'), name='Current Episode', showlegend=False),
+    row=1, col=2
+)
+
+# Bottom-left: Comfort Reward
+fig.add_trace(
+    go.Scatter(x=[], y=[], mode='lines+markers', line=dict(color='green', width=2), name='Comfort Reward'),
+    row=2, col=1
+)
+fig.add_trace(
+    go.Scatter(x=[1,1], y=[-1000,1000], mode='lines', line=dict(color='white', dash='dash'), name='Current Episode', showlegend=False),
+    row=2, col=1
+)
+
+# Bottom-right: Energy Reward
+fig.add_trace(
+    go.Scatter(x=[], y=[], mode='lines+markers', line=dict(color='orange', width=2), name='Energy Reward'),
+    row=2, col=2
+)
+fig.add_trace(
+    go.Scatter(x=[1,1], y=[-1000,1000], mode='lines', line=dict(color='white', dash='dash'), name='Current Episode', showlegend=False),
+    row=2, col=2
+)
+
+# Update layout
+fig.update_layout(
+    height=800,
+    showlegend=True,
+    legend=dict(x=1.02, y=1)
+)
+
+# Update axis labels
+fig.update_xaxes(title_text="Episode", row=1, col=1)
+fig.update_yaxes(title_text="Total Reward", row=1, col=1)
+fig.update_xaxes(title_text="Episode", row=1, col=2)
+fig.update_yaxes(title_text="Pollutants Reward", row=1, col=2)
+fig.update_xaxes(title_text="Episode", row=2, col=1)
+fig.update_yaxes(title_text="Comfort Reward", row=2, col=1)
+fig.update_xaxes(title_text="Episode", row=2, col=2)
+fig.update_yaxes(title_text="Energy Reward", row=2, col=2)
+
+# Set ranges - only x-axis is fixed
+for row in [1, 2]:
+    for col in [1, 2]:
+        fig.update_xaxes(range=[0, num_episodes + 1], row=row, col=col)
 
 # -----------------------------
 # Handle button clicks
@@ -882,77 +950,83 @@ if replay_button:
     st.session_state.current_episode = 1
     st.session_state.episode_rewards = []
     st.session_state.episode_numbers = []
-    st.session_state.pollutant_rewards = []
+    st.session_state.pollutants_rewards = []
     st.session_state.comfort_rewards = []
     st.session_state.energy_rewards = []
-    st.session_state.component_table = []
-
+    st.session_state.reward_components_history = []
 
 # -----------------------------
 # Run Evaluation Loop
 # -----------------------------
-for ep in range(1, num_episodes + 1):
+while st.session_state.current_episode <= num_episodes:
     if not st.session_state.is_playing:
         break
 
+    ep = st.session_state.current_episode
 
     obs, _ = env.reset()
     done = False
     total_reward = 0.0
-    pollutant_sum = 0.0
-    comfort_sum = 0.0
-    energy_sum = 0.0
-
-    nh3_sum = 0.0
-    h2s_sum = 0.0
-    co2_sum = 0.0
-    temp_sum = 0.0
-    hum_sum = 0.0
-
-
+    episode_pollutants_reward = 0.0
+    episode_comfort_reward = 0.0
+    episode_energy_reward = 0.0
+    
+    step_count = 0
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
+        
+        # Get reward components from environment
+        ri = env.unwrapped.reward_info
+        
+        # Calculate rewards for different categories
+        pollutants_reward_step = ri["co2"] + ri["nh3"] + ri["h2s"]  # CO2 + NH3 + H2S
+        comfort_reward_step = ri["comfort"]  # comfort_r
+        energy_reward_step = ri["energy"]  # energy_c
+        
         total_reward += reward
+        episode_pollutants_reward += pollutants_reward_step
+        episode_comfort_reward += comfort_reward_step
+        episode_energy_reward += energy_reward_step
+        
         done = terminated or truncated
-        _, components = calculate_total_reward(
-        info["state_dict"],
-        info["action"],
-        weighter=None
-    )
-
-        co2_r, nh3_r, h2s_r, comfort_r, energy_r = components
-
-        pollutant_sum += (co2_r + nh3_r + h2s_r)
-        comfort_sum += comfort_r
-        energy_sum += energy_r
-
-        co2_sum += co2_r
-        nh3_sum += nh3_r
-        h2s_sum += h2s_r
-        temp_sum += comfort_r / 2.0
-        hum_sum += comfort_r / 2.0
-
+        step_count += 1
+    
+    # Calculate average component rewards for this episode
+    if step_count > 0:
+        avg_co2 = episode_pollutants_reward / 3 / step_count  # Rough average
+        avg_nh3 = episode_pollutants_reward / 3 / step_count  # Rough average
+        avg_h2s = episode_pollutants_reward / 3 / step_count  # Rough average
+        avg_comfort = episode_comfort_reward / step_count
+        avg_energy = episode_energy_reward / step_count
+    else:
+        avg_co2 = avg_nh3 = avg_h2s = avg_comfort = avg_energy = 0.0
+    
     # Save episode data
     st.session_state.episode_rewards.append(total_reward)
     st.session_state.episode_numbers.append(ep)
-    st.session_state.pollutant_rewards.append(pollutant_sum)
-    st.session_state.comfort_rewards.append(comfort_sum)
-    st.session_state.energy_rewards.append(energy_sum)
-
-    st.session_state.component_table.append({
-        "Episode": ep,
-        "NH3 Reward": nh3_sum,
-        "H2S Reward": h2s_sum,
-        "CO2 Reward": co2_sum,
-        "Temperature Reward": temp_sum,
-        "Humidity Reward": hum_sum
+    st.session_state.pollutants_rewards.append(episode_pollutants_reward)
+    st.session_state.comfort_rewards.append(episode_comfort_reward)
+    st.session_state.energy_rewards.append(episode_energy_reward)
+    
+    # Store individual component rewards for table
+    st.session_state.reward_components_history.append({
+        'Episode': ep,
+        'NH3_reward': avg_nh3,
+        'H2S_reward': avg_h2s,
+        'CO2_reward': avg_co2,
+        'Comfort_reward': avg_comfort,
+        'Energy_reward': avg_energy,
+        'Total_reward': total_reward
     })
 
     # Update state display
     state_placeholder.markdown(
         f"**Episode {ep} finished!**  \n"
         f"**Total Reward:** {total_reward:.2f}  \n"
+        f"**Pollutants Reward:** {episode_pollutants_reward:.2f}  \n"
+        f"**Comfort Reward:** {episode_comfort_reward:.2f}  \n"
+        f"**Energy Reward:** {episode_energy_reward:.2f}  \n"
         f"**Final NH3:** {info['state_dict']['nh3_ppm']:.3f} ppm  \n"
         f"**Final H2S:** {info['state_dict']['h2s_ppm']:.3f} ppm  \n"
         f"**Final CO2:** {info['state_dict']['co2_ppm']:.0f} ppm  \n"
@@ -960,88 +1034,121 @@ for ep in range(1, num_episodes + 1):
         f"**Final Humidity:** {info['state_dict']['humidity_percent']:.1f} %"
     )
 
-    # Update plot
-    fig_total.data[0].x = st.session_state.episode_numbers
-    fig_total.data[0].y = st.session_state.episode_rewards
+    # Update all graphs and their ranges dynamically
+    # Update total reward plot (data[0] is the blue line, data[1] is the white dashed line)
+    fig.data[0].x = st.session_state.episode_numbers
+    fig.data[0].y = st.session_state.episode_rewards
 
-    fig_pollutant.data[0].x = st.session_state.episode_numbers
-    fig_pollutant.data[0].y = st.session_state.pollutant_rewards
+    if len(st.session_state.episode_rewards) > 0:
+        y_min_total = min(st.session_state.episode_rewards)
+        y_max_total = max(st.session_state.episode_rewards)
+        y_padding_total = (y_max_total - y_min_total) * 0.1 if y_max_total != y_min_total else abs(y_min_total) * 0.1 + 10
+        fig.data[1].x = [ep, ep]
+        fig.data[1].y = [y_min_total - y_padding_total, y_max_total + y_padding_total]
+        # Update the y-axis range for this subplot
+        fig.update_yaxes(range=[y_min_total - y_padding_total, y_max_total + y_padding_total], row=1, col=1)
+    else:
+        fig.data[1].x = [ep, ep]
+        fig.data[1].y = [-100, 100]
+        fig.update_yaxes(range=[-100, 100], row=1, col=1)
 
-    fig_comfort.data[0].x = st.session_state.episode_numbers
-    fig_comfort.data[0].y = st.session_state.comfort_rewards
+    # Update pollutants reward plot (data[2] is the red line, data[3] is the white dashed line)
+    fig.data[2].x = st.session_state.episode_numbers
+    fig.data[2].y = st.session_state.pollutants_rewards
 
-    fig_energy.data[0].x = st.session_state.episode_numbers
-    fig_energy.data[0].y = st.session_state.energy_rewards
+    if len(st.session_state.pollutants_rewards) > 0:
+        y_min_poll = min(st.session_state.pollutants_rewards)
+        y_max_poll = max(st.session_state.pollutants_rewards)
+        y_padding_poll = (y_max_poll - y_min_poll) * 0.1 if y_max_poll != y_min_poll else abs(y_min_poll) * 0.1 + 10
+        fig.data[3].x = [ep, ep]
+        fig.data[3].y = [y_min_poll - y_padding_poll, y_max_poll + y_padding_poll]
+        fig.update_yaxes(range=[y_min_poll - y_padding_poll, y_max_poll + y_padding_poll], row=1, col=2)
+    else:
+        fig.data[3].x = [ep, ep]
+        fig.data[3].y = [-100, 100]
+        fig.update_yaxes(range=[-100, 100], row=1, col=2)
 
+    # Update comfort reward plot (data[4] is the green line, data[5] is the white dashed line)
+    fig.data[4].x = st.session_state.episode_numbers
+    fig.data[4].y = st.session_state.comfort_rewards
 
+    if len(st.session_state.comfort_rewards) > 0:
+        y_min_comfort = min(st.session_state.comfort_rewards)
+        y_max_comfort = max(st.session_state.comfort_rewards)
+        y_padding_comfort = (y_max_comfort - y_min_comfort) * 0.1 if y_max_comfort != y_min_comfort else abs(y_min_comfort) * 0.1 + 10
+        fig.data[5].x = [ep, ep]
+        fig.data[5].y = [y_min_comfort - y_padding_comfort, y_max_comfort + y_padding_comfort]
+        fig.update_yaxes(range=[y_min_comfort - y_padding_comfort, y_max_comfort + y_padding_comfort], row=2, col=1)
+    else:
+        fig.data[5].x = [ep, ep]
+        fig.data[5].y = [-100, 100]
+        fig.update_yaxes(range=[-100, 100], row=2, col=1)
 
+    # Update energy reward plot (data[6] is the orange line, data[7] is the white dashed line)
+    fig.data[6].x = st.session_state.episode_numbers
+    fig.data[6].y = st.session_state.energy_rewards
+
+    if len(st.session_state.energy_rewards) > 0:
+        y_min_energy = min(st.session_state.energy_rewards)
+        y_max_energy = max(st.session_state.energy_rewards)
+        y_padding_energy = (y_max_energy - y_min_energy) * 0.1 if y_max_energy != y_min_energy else abs(y_min_energy) * 0.1 + 10
+        fig.data[7].x = [ep, ep]
+        fig.data[7].y = [y_min_energy - y_padding_energy, y_max_energy + y_padding_energy]
+        fig.update_yaxes(range=[y_min_energy - y_padding_energy, y_max_energy + y_padding_energy], row=2, col=2)
+    else:
+        fig.data[7].x = [ep, ep]
+        fig.data[7].y = [-100, 100]
+        fig.update_yaxes(range=[-100, 100], row=2, col=2)
+
+    fig_placeholder.plotly_chart(fig, use_container_width=True)
     
+    # Update the reward components table
+    if st.session_state.reward_components_history:
+        # Create DataFrame from history
+        df = pd.DataFrame(st.session_state.reward_components_history)
+        
+        # Format the DataFrame for display
+        display_df = df.copy()
+        # Format each column
+        display_df['NH3_reward'] = display_df['NH3_reward'].map('{:,.4f}'.format)
+        display_df['H2S_reward'] = display_df['H2S_reward'].map('{:,.4f}'.format)
+        display_df['CO2_reward'] = display_df['CO2_reward'].map('{:,.4f}'.format)
+        display_df['Comfort_reward'] = display_df['Comfort_reward'].map('{:,.4f}'.format)
+        display_df['Energy_reward'] = display_df['Energy_reward'].map('{:,.4f}'.format)
+        display_df['Total_reward'] = display_df['Total_reward'].map('{:,.2f}'.format)
+        
+        # Reorder columns for better presentation
+        display_df = display_df[['Episode', 'NH3_reward', 'H2S_reward', 'CO2_reward', 
+                                 'Comfort_reward', 'Energy_reward', 'Total_reward']]
+        
+        # Display the table with some styling
+        table_placeholder.markdown("### Episode Reward Components")
+        
+        # Create a styled table
+        table_placeholder.markdown("""
+        <style>
+        .dataframe {
+            font-size: 12px;
+        }
+        .dataframe thead th {
+            background-color: #f0f0f0;
+            text-align: center;
+        }
+        .dataframe tbody tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        table_placeholder.dataframe(
+            display_df,
+            use_container_width=True,
+            height=400,
+            hide_index=True
+        )
+
+    # Increment episode
+    st.session_state.current_episode += 1
     time.sleep(speed)
 
-# git
-
-import pandas as pd
-
-df = pd.DataFrame(
-    st.session_state.component_table,
-    columns=[
-        "Episode",
-        "NH3 reward",
-        "H2S reward",
-        "CO2 reward",
-        "Total Pollutants Reward",
-        "Comfort reward",
-        "Energy reward",
-        "Total reward"
-    ]
-)
-
-st.subheader("📋 Reward Breakdown Table")
-st.dataframe(df, use_container_width=True)
-
-
-st.subheader("📊 Reward Breakdown per Episode")
-st.dataframe(
-    np.array([
-        [
-            row["Episode"],
-            row["NH3 Reward"],
-            row["H2S Reward"],
-            row["CO2 Reward"],
-            row["Temperature Reward"],
-            row["Humidity Reward"]
-        ]
-        for row in st.session_state.component_table
-    ]),
-    use_container_width=True
-)
-
-col1.plotly_chart(fig_total, use_container_width=True)
-col2.plotly_chart(fig_pollutant, use_container_width=True)
-col3.plotly_chart(fig_comfort, use_container_width=True)
-col4.plotly_chart(fig_energy, use_container_width=True)
-
-
 st.success("✅ PPO Evaluation Finished!")
-
-# st.subheader("📊 Reward Breakdown per Episode")
-# st.dataframe(
-#     np.array([
-#         [
-#             row["Episode"],
-#             row["NH3 Reward"],
-#             row["H2S Reward"],
-#             row["CO2 Reward"],
-#             row["Temperature Reward"],
-#             row["Humidity Reward"]
-#         ]
-#         for row in st.session_state.component_table
-#     ]),
-#     use_container_width=True
-# )
-
-# col1.plotly_chart(fig_total, use_container_width=True)
-# col2.plotly_chart(fig_pollutant, use_container_width=True)
-# col3.plotly_chart(fig_comfort, use_container_width=True)
-# col4.plotly_chart(fig_energy, use_container_width=True)
-
