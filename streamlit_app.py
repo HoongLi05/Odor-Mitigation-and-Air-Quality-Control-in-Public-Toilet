@@ -595,24 +595,13 @@ class ToiletEnv(gym.Env): # Inherit from gymnasium.Env
         # Calculate the reward using the dedicated function
         reward, components = calculate_total_reward(current_state_dict, action, self.reward_weighter)
 
-        info = {
-            'step': self.current_step,
-            'action': action,
-            'state_dict': current_state_dict,
-            'equipment': {
-                'exhaust_fan': self.Public_Toilet_state.exhaust_fan_on,
-                'ceiling_fan': self.Public_Toilet_state.ceiling_fan_on,
-                'dehumidifier': self.Public_Toilet_state.dehumidifier_on,
-        },
-        'reward_components': {
-            'co2': components[0],
-            'nh3': components[1],
-            'h2s': components[2],
-            'comfort': components[3],
-            'energy': components[4],
+        self.reward_info = {
+            "co2": components[0],
+            "nh3": components[1],
+            "h2s": components[2],
+            "comfort": components[3],
+            "energy": components[4],
         }
-    }
-
 
         # Update reward weights
         self.reward_weighter.update(components)
@@ -771,13 +760,7 @@ def evaluate_policy_metrics(model, env, n_episodes=300, window=30):
 
             total_reward += reward
 
-            ri = info.get('reward_components', {
-                    "co2": 0,
-                    "nh3": 0,
-                    "h2s": 0,
-                    "comfort": 0,
-                    "energy": 0
-            })
+            ri = getattr(env.unwrapped, 'reward_info', {"co2": 0, "nh3": 0, "h2s": 0, "comfort": 0, "energy": 0})
 
             # ---- reward components ----
             pollutant_sum += ri["co2"] + ri["nh3"] + ri["h2s"]
@@ -973,7 +956,7 @@ if replay_button:
     st.session_state.reward_components_history = []
 
 # -----------------------------
-# Run Evaluation Loop (Safe Version)
+# Run Evaluation Loop
 # -----------------------------
 while st.session_state.current_episode <= num_episodes:
     if not st.session_state.is_playing:
@@ -981,58 +964,51 @@ while st.session_state.current_episode <= num_episodes:
 
     ep = st.session_state.current_episode
 
-    # Reset environment
-    reset_result = env.reset()
-    if isinstance(reset_result, tuple) and len(reset_result) == 2:
-        obs, _ = reset_result
-    else:
-        obs = reset_result
+    obs, _ = env.reset()
     done = False
-
-    # Initialize episode rewards
     total_reward = 0.0
     episode_pollutants_reward = 0.0
     episode_comfort_reward = 0.0
     episode_energy_reward = 0.0
+    
     step_count = 0
-
     while not done:
-        # Predict action
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
-
-        # Safely get reward components
+        
+        # Get reward components from environment
         ri = getattr(env.unwrapped, 'reward_info', {"co2": 0, "nh3": 0, "h2s": 0, "comfort": 0, "energy": 0})
-        pollutants_reward_step = ri.get("co2", 0) + ri.get("nh3", 0) + ri.get("h2s", 0)
-        comfort_reward_step = ri.get("comfort", 0)
-        energy_reward_step = ri.get("energy", 0)
-
-        # Accumulate rewards
+        
+        # Calculate rewards for different categories
+        pollutants_reward_step = ri["co2"] + ri["nh3"] + ri["h2s"]  # CO2 + NH3 + H2S
+        comfort_reward_step = ri["comfort"]  # comfort_r
+        energy_reward_step = ri["energy"]  # energy_c
+        
         total_reward += reward
         episode_pollutants_reward += pollutants_reward_step
         episode_comfort_reward += comfort_reward_step
         episode_energy_reward += energy_reward_step
-
+        
         done = terminated or truncated
         step_count += 1
-
+    
     # Calculate average component rewards for this episode
     if step_count > 0:
-        avg_co2 = episode_pollutants_reward / 3 / step_count
-        avg_nh3 = episode_pollutants_reward / 3 / step_count
-        avg_h2s = episode_pollutants_reward / 3 / step_count
+        avg_co2 = episode_pollutants_reward / 3 / step_count  # Rough average
+        avg_nh3 = episode_pollutants_reward / 3 / step_count  # Rough average
+        avg_h2s = episode_pollutants_reward / 3 / step_count  # Rough average
         avg_comfort = episode_comfort_reward / step_count
         avg_energy = episode_energy_reward / step_count
     else:
         avg_co2 = avg_nh3 = avg_h2s = avg_comfort = avg_energy = 0.0
-
+    
     # Save episode data
     st.session_state.episode_rewards.append(total_reward)
     st.session_state.episode_numbers.append(ep)
     st.session_state.pollutants_rewards.append(episode_pollutants_reward)
     st.session_state.comfort_rewards.append(episode_comfort_reward)
     st.session_state.energy_rewards.append(episode_energy_reward)
-
+    
     # Store individual component rewards for table
     st.session_state.reward_components_history.append({
         'Episode': ep,
@@ -1044,9 +1020,6 @@ while st.session_state.current_episode <= num_episodes:
         'Total_reward': total_reward
     })
 
-    # Safely get final state info
-    state_dict = info.get('state_dict', {"nh3_ppm": 0, "h2s_ppm": 0, "co2_ppm": 0, "temperature_c": 0, "humidity_percent": 0})
-
     # Update state display
     state_placeholder.markdown(
         f"**Episode {ep} finished!**  \n"
@@ -1054,78 +1027,125 @@ while st.session_state.current_episode <= num_episodes:
         f"**Pollutants Reward:** {episode_pollutants_reward:.2f}  \n"
         f"**Comfort Reward:** {episode_comfort_reward:.2f}  \n"
         f"**Energy Reward:** {episode_energy_reward:.2f}  \n"
-        f"**Final NH3:** {state_dict['nh3_ppm']:.3f} ppm  \n"
-        f"**Final H2S:** {state_dict['h2s_ppm']:.3f} ppm  \n"
-        f"**Final CO2:** {state_dict['co2_ppm']:.0f} ppm  \n"
-        f"**Final Temp:** {state_dict['temperature_c']:.1f} °C  \n"
-        f"**Final Humidity:** {state_dict['humidity_percent']:.1f} %"
+        f"**Final NH3:** {info['state_dict']['nh3_ppm']:.3f} ppm  \n"
+        f"**Final H2S:** {info['state_dict']['h2s_ppm']:.3f} ppm  \n"
+        f"**Final CO2:** {info['state_dict']['co2_ppm']:.0f} ppm  \n"
+        f"**Final Temp:** {info['state_dict']['temperature_c']:.1f} °C  \n"
+        f"**Final Humidity:** {info['state_dict']['humidity_percent']:.1f} %"
     )
 
-    # -----------------------------
-    # Update all plots
-    # -----------------------------
-    # Total reward plot
+    # Update all graphs and their ranges dynamically
+    # Update total reward plot (data[0] is the blue line, data[1] is the white dashed line)
     fig.data[0].x = st.session_state.episode_numbers
     fig.data[0].y = st.session_state.episode_rewards
-    y_min_total = min(st.session_state.episode_rewards, default=0)
-    y_max_total = max(st.session_state.episode_rewards, default=100)
-    y_padding_total = (y_max_total - y_min_total) * 0.1 + 1
-    fig.data[1].x = [ep, ep]
-    fig.data[1].y = [y_min_total - y_padding_total, y_max_total + y_padding_total]
-    fig.update_yaxes(range=[y_min_total - y_padding_total, y_max_total + y_padding_total], row=1, col=1)
 
-    # Pollutants reward plot
+    if len(st.session_state.episode_rewards) > 0:
+        y_min_total = min(st.session_state.episode_rewards)
+        y_max_total = max(st.session_state.episode_rewards)
+        y_padding_total = (y_max_total - y_min_total) * 0.1 if y_max_total != y_min_total else abs(y_min_total) * 0.1 + 10
+        fig.data[1].x = [ep, ep]
+        fig.data[1].y = [y_min_total - y_padding_total, y_max_total + y_padding_total]
+        # Update the y-axis range for this subplot
+        fig.update_yaxes(range=[y_min_total - y_padding_total, y_max_total + y_padding_total], row=1, col=1)
+    else:
+        fig.data[1].x = [ep, ep]
+        fig.data[1].y = [-100, 100]
+        fig.update_yaxes(range=[-100, 100], row=1, col=1)
+
+    # Update pollutants reward plot (data[2] is the red line, data[3] is the white dashed line)
     fig.data[2].x = st.session_state.episode_numbers
     fig.data[2].y = st.session_state.pollutants_rewards
-    y_min_poll = min(st.session_state.pollutants_rewards, default=0)
-    y_max_poll = max(st.session_state.pollutants_rewards, default=100)
-    y_padding_poll = (y_max_poll - y_min_poll) * 0.1 + 1
-    fig.data[3].x = [ep, ep]
-    fig.data[3].y = [y_min_poll - y_padding_poll, y_max_poll + y_padding_poll]
-    fig.update_yaxes(range=[y_min_poll - y_padding_poll, y_max_poll + y_padding_poll], row=1, col=2)
 
-    # Comfort reward plot
+    if len(st.session_state.pollutants_rewards) > 0:
+        y_min_poll = min(st.session_state.pollutants_rewards)
+        y_max_poll = max(st.session_state.pollutants_rewards)
+        y_padding_poll = (y_max_poll - y_min_poll) * 0.1 if y_max_poll != y_min_poll else abs(y_min_poll) * 0.1 + 10
+        fig.data[3].x = [ep, ep]
+        fig.data[3].y = [y_min_poll - y_padding_poll, y_max_poll + y_padding_poll]
+        fig.update_yaxes(range=[y_min_poll - y_padding_poll, y_max_poll + y_padding_poll], row=1, col=2)
+    else:
+        fig.data[3].x = [ep, ep]
+        fig.data[3].y = [-100, 100]
+        fig.update_yaxes(range=[-100, 100], row=1, col=2)
+
+    # Update comfort reward plot (data[4] is the green line, data[5] is the white dashed line)
     fig.data[4].x = st.session_state.episode_numbers
     fig.data[4].y = st.session_state.comfort_rewards
-    y_min_comfort = min(st.session_state.comfort_rewards, default=0)
-    y_max_comfort = max(st.session_state.comfort_rewards, default=100)
-    y_padding_comfort = (y_max_comfort - y_min_comfort) * 0.1 + 1
-    fig.data[5].x = [ep, ep]
-    fig.data[5].y = [y_min_comfort - y_padding_comfort, y_max_comfort + y_padding_comfort]
-    fig.update_yaxes(range=[y_min_comfort - y_padding_comfort, y_max_comfort + y_padding_comfort], row=2, col=1)
 
-    # Energy reward plot
+    if len(st.session_state.comfort_rewards) > 0:
+        y_min_comfort = min(st.session_state.comfort_rewards)
+        y_max_comfort = max(st.session_state.comfort_rewards)
+        y_padding_comfort = (y_max_comfort - y_min_comfort) * 0.1 if y_max_comfort != y_min_comfort else abs(y_min_comfort) * 0.1 + 10
+        fig.data[5].x = [ep, ep]
+        fig.data[5].y = [y_min_comfort - y_padding_comfort, y_max_comfort + y_padding_comfort]
+        fig.update_yaxes(range=[y_min_comfort - y_padding_comfort, y_max_comfort + y_padding_comfort], row=2, col=1)
+    else:
+        fig.data[5].x = [ep, ep]
+        fig.data[5].y = [-100, 100]
+        fig.update_yaxes(range=[-100, 100], row=2, col=1)
+
+    # Update energy reward plot (data[6] is the orange line, data[7] is the white dashed line)
     fig.data[6].x = st.session_state.episode_numbers
     fig.data[6].y = st.session_state.energy_rewards
-    y_min_energy = min(st.session_state.energy_rewards, default=0)
-    y_max_energy = max(st.session_state.energy_rewards, default=100)
-    y_padding_energy = (y_max_energy - y_min_energy) * 0.1 + 1
-    fig.data[7].x = [ep, ep]
-    fig.data[7].y = [y_min_energy - y_padding_energy, y_max_energy + y_padding_energy]
-    fig.update_yaxes(range=[y_min_energy - y_padding_energy, y_max_energy + y_padding_energy], row=2, col=2)
+
+    if len(st.session_state.energy_rewards) > 0:
+        y_min_energy = min(st.session_state.energy_rewards)
+        y_max_energy = max(st.session_state.energy_rewards)
+        y_padding_energy = (y_max_energy - y_min_energy) * 0.1 if y_max_energy != y_min_energy else abs(y_min_energy) * 0.1 + 10
+        fig.data[7].x = [ep, ep]
+        fig.data[7].y = [y_min_energy - y_padding_energy, y_max_energy + y_padding_energy]
+        fig.update_yaxes(range=[y_min_energy - y_padding_energy, y_max_energy + y_padding_energy], row=2, col=2)
+    else:
+        fig.data[7].x = [ep, ep]
+        fig.data[7].y = [-100, 100]
+        fig.update_yaxes(range=[-100, 100], row=2, col=2)
 
     fig_placeholder.plotly_chart(fig, use_container_width=True)
-
-    # -----------------------------
-    # Update reward components table
-    # -----------------------------
+    
+    # Update the reward components table
     if st.session_state.reward_components_history:
+        # Create DataFrame from history
         df = pd.DataFrame(st.session_state.reward_components_history)
+        
+        # Format the DataFrame for display
         display_df = df.copy()
-        for col in ['NH3_reward','H2S_reward','CO2_reward','Comfort_reward','Energy_reward']:
-            display_df[col] = display_df[col].map('{:,.4f}'.format)
+        # Format each column
+        display_df['NH3_reward'] = display_df['NH3_reward'].map('{:,.4f}'.format)
+        display_df['H2S_reward'] = display_df['H2S_reward'].map('{:,.4f}'.format)
+        display_df['CO2_reward'] = display_df['CO2_reward'].map('{:,.4f}'.format)
+        display_df['Comfort_reward'] = display_df['Comfort_reward'].map('{:,.4f}'.format)
+        display_df['Energy_reward'] = display_df['Energy_reward'].map('{:,.4f}'.format)
         display_df['Total_reward'] = display_df['Total_reward'].map('{:,.2f}'.format)
-        display_df = display_df[['Episode','NH3_reward','H2S_reward','CO2_reward','Comfort_reward','Energy_reward','Total_reward']]
-
+        
+        # Reorder columns for better presentation
+        display_df = display_df[['Episode', 'NH3_reward', 'H2S_reward', 'CO2_reward', 
+                                 'Comfort_reward', 'Energy_reward', 'Total_reward']]
+        
+        # Display the table with some styling
         table_placeholder.markdown("### Episode Reward Components")
+        
+        # Create a styled table
         table_placeholder.markdown("""
         <style>
-        .dataframe { font-size: 12px; }
-        .dataframe thead th { background-color: #f0f0f0; text-align: center; }
-        .dataframe tbody tr:nth-child(even) { background-color: #f9f9f9; }
+        .dataframe {
+            font-size: 12px;
+        }
+        .dataframe thead th {
+            background-color: #f0f0f0;
+            text-align: center;
+        }
+        .dataframe tbody tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
         </style>
         """, unsafe_allow_html=True)
-        table_placeholder.dataframe(display_df, use_container_width=True, height=400, hide_index=True)
+        
+        table_placeholder.dataframe(
+            display_df,
+            use_container_width=True,
+            height=400,
+            hide_index=True
+        )
 
     # Increment episode
     st.session_state.current_episode += 1
